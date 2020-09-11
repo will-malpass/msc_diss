@@ -1,0 +1,592 @@
+---
+title: "Network effects"
+output:
+  html_document:
+    df_print: paged
+  word_document: default
+---
+
+# Prep
+
+Working directories are where data exists on my PC - each chunk with a specified directory will need changing to the path where the data is held (PC specific). All data available from (expires 10/12/20): https://uob-my.sharepoint.com/:f:/g/personal/wm15380_bristol_ac_uk/EqV-zTEge_1NgpoSvkaY6goBGya8smaoEH5z5Noi1ortGw?e=nvJksw
+
+```{r include=FALSE}
+knitr::opts_chunk$set(comment = NA)
+knitr::opts_chunk$set(warning = FALSE)
+#knitr::opts_chunk$set(message = FALSE)
+```
+
+
+## Required packages
+
+```{r, results=FALSE, message=FALSE, warning=FALSE, include=FALSE} 
+req_pack <- c("tidyverse","rmarkdown", "tinytex", "skimr", "lubridate", "RMariaDB", "DBI", "bigmemory", "bigtabulate", "biganalytics", "synchronicity", "ff", "ffbase", "patchwork", "hts", "ggseas", "tseries", "psych", "ggstatsplot", "heavy", "stargazer", "car", "quantreg", "corrplot", "Hmisc", "GGally", "corrr", "huxtable", "jtools", "mgcv", "np", "PLRModels") 
+new_pack <- req_pack[!(req_pack %in% installed.packages()[,"Package"])] 
+
+if(length(new_pack)) install.packages(new_pack) 
+
+for(package in req_pack){ 
+  library(package,character.only = TRUE) 
+} 
+
+options(scipen = 100000)
+```
+
+## Data load
+
+```{r}
+setwd("C:/Users/JANGO/Desktop/MySQL/csv_exports/small_scale/networks")
+us_accounts <- read.csv("us_accounts.csv", header=FALSE)
+colnames(us_accounts) <- c("steamid", "timecreated", "existing_connections_count", "new_connections_count", "total_connections", "total_account_worth", "total_game_count", "total_game_count_paid", "total_hours_played", "total_hours_played_paid", "group_connections", "locstatecode")
+
+us_accounts$group_connections[us_accounts$group_connections=='NULL'] <- 0
+
+us_accounts %>% mutate(new_connections_count = as.numeric(new_connections_count), 
+                       total_connections = as.numeric(total_connections),
+                       group_connections = as.numeric(group_connections),
+                       steamid = as.character(steamid),
+                       timecreated = as.Date(timecreated)) -> us_accounts
+
+
+#clean up
+us_accounts <- us_accounts[!(us_accounts$locstatecode =="NULL"),] #drop null state observations
+us_accounts$new_connections_count[is.na(us_accounts$new_connections_count)] = 0 #tally error from mysql
+us_accounts %>% mutate(total_connections = new_connections_count+existing_connections_count) -> us_accounts #dealing with tally error carried forward
+  
+# US territories (excluded) & uncategorized state values - possible misreporting from the user, very few obs lost from this
+us_accounts <- us_accounts[!(us_accounts$locstatecode=="AS" |
+                               us_accounts$locstatecode=="FM" |
+                               us_accounts$locstatecode=="GU" |
+                               us_accounts$locstatecode=="MH" |
+                               us_accounts$locstatecode=="MP" |
+                               us_accounts$locstatecode=="PR" |
+                               us_accounts$locstatecode=="PW" |
+                               us_accounts$locstatecode=="VI"), ] 
+#data is composed of 50 states and the federal district of Washington D.C. US Territories (e.g. Puerto Rico, Guam etc... are not included)
+```
+
+## Summary stats
+
+```{r}
+brks <- c(0, 0.25, 0.5, 0.75, 1)
+
+us_accounts %>% 
+  group_by(locstatecode) %>% 
+  summarise(count=n()) %>% 
+  mutate(perc=(count/sum(count))*100) %>%
+  ggplot(aes(x = reorder(locstatecode, -perc), y = perc)) +
+  geom_bar(stat="identity", width = 0.7) +
+  labs(x = "State", y = "Percentage composition") +
+  theme_minimal(base_size = 7)+
+  theme(axis.text.x=element_text(angle=90, hjust=1, vjust=0.5),
+        text=element_text(size=17))
+
+ggsave("sum_plot_1.png", scale=1, height = 7, width = 10)
+
+us_accounts %>% 
+  group_by(locstatecode) %>% 
+  summarise(count=n()) %>% 
+  mutate(perc=(count/sum(count))*100) %>%
+  ggplot(aes(x = reorder(locstatecode, -perc), y = perc)) +
+  geom_bar(stat="identity", width = 0.7) +
+  labs(x = "", y = "Percentage composition") +
+  theme_minimal(base_size = 7)+
+  theme(axis.text.x=element_text(angle=90, hjust=1, vjust=0.5),
+        text=element_text(size=17)) -> stack_1
+
+# set.seed(12345)
+# small <- sample_n(us_accounts, 250000) 
+
+us_accounts %>% filter(total_connections ==0 & group_connections ==0)
+
+psych::describe(us_accounts) #copy kurtosis and skew into paper
+
+skim(us_accounts)
+stargazer(data.frame(us_accounts),type="html", digits=2, out="us_accounts_sum.doc")
+
+```
+
+## Summary stats (cont)
+
+```{r}
+setwd("C:/Users/JANGO/OneDrive - University of Bristol/Documents/MSc Dissertation/Data/population")
+#weighting by state population as of April 1 2010 from the census. Data from https://www.census.gov/data/tables/time-series/demo/popest/2010s-state-total.html
+pop_2010 <- read.csv("nst-est2019-01mod.csv", header=FALSE, skip=2) %>% select(-c(V1,V2)) 
+colnames(pop_2010) <- c("locstatecode", "weighted_pop")
+
+pop_2010[-c(52:54),] -> pop_2010 #blank rows
+
+us_accounts %>% 
+  group_by(locstatecode) %>% 
+  summarise(count=n()) -> count_a
+
+count_a %>% left_join(pop_2010, count_a, by="locstatecode") %>%
+  mutate(weighted_count = count*weighted_pop) %>%
+  mutate(perc=(weighted_count/sum(weighted_count))*100) %>%
+  ggplot(aes(x = reorder(locstatecode, -perc), y = perc)) +
+  geom_bar(stat="identity", width = 0.7) +
+  labs(x = "State", y = "Weighted by population percentage composition") +
+  theme_minimal(base_size = 7)+
+  theme(axis.text.x=element_text(angle=90, hjust=1, vjust=0.5),
+        text=element_text(size=17))
+
+count_a %>% left_join(pop_2010, count_a, by="locstatecode") %>%
+  mutate(weighted_count = count*weighted_pop) %>%
+  mutate(perc=(weighted_count/sum(weighted_count))*100) %>%
+  ggplot(aes(x = reorder(locstatecode, -perc), y = perc)) +
+  geom_bar(stat="identity", width = 0.7) +
+  labs(x = "State", y = "Weighted by population percentage composition") +
+  theme_minimal(base_size = 7)+
+  theme(axis.text.x=element_text(angle=90, hjust=1, vjust=0.5),
+        text=element_text(size=17)) -> stack_2
+
+stack_1/stack_2
+
+ggsave("stack_sum_plot.png", height = 9, width = 12)
+```
+
+## Q-Q plots
+
+```{r}
+#non-transformed
+qqPlot(us_accounts$existing_connections_count, xlab =paste("Quantiles"), ylab =paste("Existing connections"))
+qqPlot(us_accounts$new_connections_count, xlab =paste("Quantiles"), ylab =paste("New connections"))
+qqPlot(us_accounts$total_connections, xlab =paste("Quantiles"), ylab =paste("Total Connections"))
+qqPlot(us_accounts$total_account_worth, xlab =paste("Quantiles"), ylab =paste("Total account worth"))
+qqPlot(us_accounts$total_game_count, xlab =paste("Quantiles"), ylab =paste("Total game count"))
+qqPlot(us_accounts$total_game_count_paid, xlab =paste("Quantiles"), ylab =paste("Total game count paid for"))
+qqPlot(us_accounts$total_hours_played, xlab =paste("Quantiles"), ylab =paste("Total hours played"))
+qqPlot(us_accounts$total_hours_played_paid, xlab =paste("Quantiles"), ylab =paste("Total hours played paid for"))
+qqPlot(us_accounts$group_connections, xlab =paste("Quantiles"), ylab =paste("Group connections"))
+
+#ihs transformed
+qqPlot(small1$ihs_existing_connections_count, xlab =paste("Quantiles"), ylab =paste("Existing connections"))
+qqPlot(small1$ihs_new_connections_count, xlab =paste("Quantiles"), ylab =paste("New connections"))
+qqPlot(small1$ihs_total_connections, xlab =paste("Quantiles"), ylab =paste("Total Connections"))
+qqPlot(small1$ihs_total_account_worth, xlab =paste("Quantiles"), ylab =paste("Total account worth"))
+qqPlot(small1$ihs_total_game_count, xlab =paste("Quantiles"), ylab =paste("Total game count"))
+qqPlot(small1$ihs_total_game_count_paid, xlab =paste("Quantiles"), ylab =paste("Total game count paid for"))
+qqPlot(small1$ihs_total_hours_played, xlab =paste("Quantiles"), ylab =paste("Total hours played"))
+qqPlot(small1$ihs_total_hours_played_paid, xlab =paste("Quantiles"), ylab =paste("Total hours played paid for"))
+qqPlot(small1$ihs_group_connections, xlab =paste("Quantiles"), ylab =paste("Group connections"))
+
+```
+
+
+
+# In-means regressions
+
+## Data load
+
+```{r}
+setwd("C:/Users/JANGO/Desktop/MySQL/csv_exports/small_scale/networks")
+in_means_sample <- read.csv("in_means_sample.csv", header=FALSE) %>% select(-c(V4))
+colnames(in_means_sample) <- c("steamid", "friends_avg_hours", "friends_avg_value", "timecreated", "existing_connections_count", "new_connections_count", "total_connections", "total_account_worth", "total_game_count", "total_game_count_paid", "total_hours_played", "total_hours_played_paid", "group_connections", "locstatecode")
+
+in_means_sample$group_connections[in_means_sample$group_connections=='NULL'] <- 0
+
+in_means_sample %>% mutate(new_connections_count = as.numeric(new_connections_count), 
+                       total_connections = as.numeric(total_connections),
+                       group_connections = as.numeric(group_connections),
+                       steamid = as.character(steamid),
+                       timecreated = as.Date(timecreated)) -> in_means_sample
+
+
+#clean up
+in_means_sample <- in_means_sample[!(in_means_sample$locstatecode =="NULL"),] #drop null state observations
+in_means_sample$new_connections_count[is.na(in_means_sample$new_connections_count)] = 0 #tally error from mysql
+in_means_sample %>% mutate(total_connections = new_connections_count+existing_connections_count) -> in_means_sample #tally error carried forward
+  
+# US territories (excluded) & uncategorized state values - possible misreporting from the user, very few obs lost from this
+in_means_sample <- in_means_sample[!(in_means_sample$locstatecode=="AS" |
+                               in_means_sample$locstatecode=="FM" |
+                               in_means_sample$locstatecode=="GU" |
+                               in_means_sample$locstatecode=="MH" |
+                               in_means_sample$locstatecode=="MP" |
+                               in_means_sample$locstatecode=="PR" |
+                               in_means_sample$locstatecode=="PW" |
+                               in_means_sample$locstatecode=="VI"), ] 
+#data is composed of 50 states and the federal district of Washington D.C. US Territories (e.g. Puerto Rico, Guam etc... are not included)
+```
+
+## State controls
+
+```{r}
+setwd("C:/Users/JANGO/OneDrive - University of Bristol/Documents/MSc Dissertation/Data/controls")
+medincome_2010 <- read.csv("median_income_us_2010.csv", skip =1, header=FALSE)
+colnames(medincome_2010) <- c("locstatecode", "median_income")
+
+in_means_sample <- left_join(in_means_sample, medincome_2010, by="locstatecode")
+
+unemp_2010 <- read.csv("state_unemp_2010.csv", skip =1,  header=FALSE) %>% select(V2,V15)
+colnames(unemp_2010) <- c("locstatecode", "2010_unemp_rate")
+
+in_means_sample <- left_join(in_means_sample, unemp_2010, by="locstatecode") %>%
+  rename(unemp_rate_2010 = "2010_unemp_rate") %>%
+  rename(median_income_2010 = "median_income")
+
+age_comp_2010 <- read.csv("age_comp_19_25.csv", header=FALSE)
+colnames(age_comp_2010) <- c("locstatecode", "age_comp_19_25")
+
+in_means_sample <- left_join(in_means_sample, age_comp_2010, by="locstatecode")
+
+rm(medincome_2010, unemp_2010, age_comp_19_25)
+```
+
+## Pre-estimation test
+
+```{r}
+in_means_sample %>% select(-c("steamid", "timecreated", "locstatecode")) %>%
+  rename(Ex_con = "existing_connections_count",
+         Nw_con = "new_connections_count",
+         Tt_hp  = "total_hours_played",
+         G_con  = "group_connections",
+         AGO_av= "friends_avg_value") %>% select(c(2:4,9,11)) -> corr_cols
+
+
+corr_cols.cor <- cor(corr_cols, method = c("spearman"))
+corr_cols.cor
+
+#pearson is default
+ggcorr(corr_cols, nbreaks=8, low = "steelblue", mid = "white", high = "darkred", label=TRUE, label_size=4, label_color='white')
+
+corr_cols %>% correlate() %>% network_plot(min_cor=0.1, curved = FALSE, colours=c("skyblue1", "white", "indianred2"))
+
+```
+
+## In-means reg
+
+```{r}
+ihs <- function(x) {
+  y <- log(x + sqrt(x^2 + 1))
+  return(y)
+}
+
+in_means_dat <- in_means_sample %>% mutate(ihs_total_account_worth = ihs(total_account_worth),
+                          ihs_new_connections_count = ihs(new_connections_count),
+                          ihs_existing_connections_count = ihs(existing_connections_count),
+                          ihs_total_connections = ihs(total_connections),
+                          ihs_group_connections = ihs(group_connections),
+                          ihs_total_game_count = ihs(total_game_count),
+                          ihs_total_game_count_paid = ihs(total_game_count_paid),
+                          ihs_total_hours_played = ihs(total_hours_played),
+                          ihs_total_hours_played_paid = ihs(total_hours_played_paid),
+                          ihs_friends_avg_hours = ihs(friends_avg_hours),
+                          ihs_friends_avg_value = ihs(friends_avg_value),
+                          ihs_median_income_2010 = ihs(median_income_2010),
+                          ihs_unemp_rate_2010 = ihs(unemp_rate_2010),
+                          ihs_age_comp_19_25 = ihs(age_comp_19_25))
+
+in_means_dat %>% mutate(locstatecode = as.factor(locstatecode)) -> in_means_dat
+
+im <- lm(ihs_total_account_worth ~ ihs_new_connections_count +ihs_existing_connections_count +ihs_group_connections +ihs_total_hours_played, in_means_dat)
+
+im1 <- lm(ihs_total_account_worth ~ ihs_new_connections_count +ihs_existing_connections_count +ihs_group_connections +ihs_total_hours_played +ihs_friends_avg_value, in_means_dat)
+
+im2 <- lm(ihs_total_account_worth ~ ihs_new_connections_count +ihs_existing_connections_count +ihs_group_connections +ihs_total_hours_played +ihs_friends_avg_value +ihs_median_income_2010 +ihs_unemp_rate_2010 +ihs_age_comp_19_25 +locstatecode, in_means_dat)
+
+
+summary(im)
+summary(im1)
+summary(im2)
+
+
+plot(im, cex =.2)
+plot(im1, cex=.2)
+plot(im2, cex=.2)
+
+```
+
+## HeavyLm
+
+```{r}
+heavy_reg <- heavyLm(ihs_total_account_worth ~ ihs_new_connections_count +ihs_existing_connections_count +ihs_group_connections +ihs_total_hours_played, data = in_means_dat)
+
+heavy_reg1 <- heavyLm(ihs_total_account_worth ~ ihs_new_connections_count +ihs_existing_connections_count +ihs_group_connections +ihs_total_hours_played +ihs_friends_avg_value, data = in_means_dat)
+
+heavy_reg2  <- heavyLm(ihs_total_account_worth ~ ihs_new_connections_count +ihs_existing_connections_count +ihs_group_connections +ihs_total_hours_played +ihs_friends_avg_value +ihs_median_income_2010 +ihs_unemp_rate_2010 +ihs_age_comp_19_25, data = in_means_dat)
+
+summary(heavy_reg)
+summary(heavy_reg1)
+summary(heavy_reg2)
+
+plot(resid(heavy_reg), type="p", pch = 16, cex = .1)
+plot(heavy_reg$residuals)
+qqnorm(heavy_reg$residuals);qqline(heavy_reg$residuals)
+
+plot(resid(heavy_reg1), type="p", pch = 16, cex = .1)
+plot(heavy_reg1$residuals)
+qqnorm(heavy_reg1$residuals);qqline(heavy_reg1$residuals)
+
+plot(resid(heavy_reg2), type="p", pch = 16, cex = .1)
+plot(heavy_reg2$residuals)
+qqnorm(heavy_reg2$residuals);qqline(heavy_reg2$residuals)
+
+```
+
+## RMSE comparison - Basic vs heavyLm
+
+```{r}
+RMSE <- function(error) {sqrt(mean(error^2))}
+
+RMSE(im2$residuals)
+RMSE(heavy_reg2$residuals)
+```
+
+
+## Quantile reg
+
+```{r}
+qreg20 <- rq(ihs_total_account_worth ~ ihs_new_connections_count +ihs_existing_connections_count +ihs_friends_avg_value +ihs_group_connections +ihs_total_hours_played  +ihs_median_income_2010 +ihs_unemp_rate_2010 +ihs_age_comp_19_25, in_means_dat, tau=0.2)
+qreg40 <- rq(ihs_total_account_worth ~ ihs_new_connections_count +ihs_existing_connections_count +ihs_friends_avg_value +ihs_group_connections +ihs_total_hours_played  +ihs_median_income_2010 +ihs_unemp_rate_2010 +ihs_age_comp_19_25, in_means_dat, tau=0.4)
+qreg60 <- rq(ihs_total_account_worth ~ ihs_new_connections_count +ihs_existing_connections_count +ihs_friends_avg_value +ihs_group_connections +ihs_total_hours_played  +ihs_median_income_2010 +ihs_unemp_rate_2010 +ihs_age_comp_19_25, in_means_dat, tau=0.6)
+qreg80 <- rq(ihs_total_account_worth ~ ihs_new_connections_count +ihs_existing_connections_count +ihs_friends_avg_value +ihs_group_connections +ihs_total_hours_played  +ihs_median_income_2010 +ihs_unemp_rate_2010 +ihs_age_comp_19_25, in_means_dat, tau=0.8)
+
+summary(qreg20)
+summary(qreg40)
+summary(qreg60)
+summary(qreg80)
+
+#F-test for whether quantiles are different
+anova(qreg20, qreg40, qreg60, qreg80)
+
+#plots - without controlling for state since plot cannot accommodate them
+qreg_complete <- rq(total_account_worth ~ new_connections_count +existing_connections_count +group_connections +friends_avg_value -1, in_means_dat, tau=1:4/5)
+plot(qreg_complete)
+
+#rmse calcs
+RMSE(qreg20$residuals)
+RMSE(qreg40$residuals)
+RMSE(qreg60$residuals)
+RMSE(qreg80$residuals)
+
+```
+
+
+
+# Partially linear model
+
+## NP as avg group outcome
+
+```{r}
+in_means_dat %>% mutate(locstatecode = as.factor(locstatecode)) -> np_sample
+  
+# no controls
+y <- np_sample$ihs_total_account_worth
+X <- data.frame(np_sample$ihs_group_connections,np_sample$ihs_new_connections_count,np_sample$ihs_existing_connections_count,np_sample$ihs_total_hours_played)
+Z <- data.frame(np_sample$ihs_friends_avg_value)
+
+bw <- npplregbw(xdat=X, zdat=Z, ydat=y)
+pl <- npplreg(bws=bw, y.eval=TRUE)
+
+# with controls
+y1 <- np_sample$ihs_total_account_worth
+X1 <- data.frame(np_sample$ihs_group_connections,np_sample$ihs_new_connections_count,np_sample$ihs_existing_connections_count,np_sample$ihs_total_hours_played,np_sample$ihs_median_income_2010,np_sample$ihs_unemp_rate_2010,np_sample$ihs_age_comp_19_25,np_sample$locstatecode)
+Z1 <- data.frame(np_sample$ihs_friends_avg_value)
+
+bw1 <- npplregbw(xdat=X1, zdat=Z1, ydat=y1)
+pl1 <- npplreg(bws=bw1, y.eval=TRUE)
+
+```
+
+## NP as total hours played
+
+```{r}
+#no controls
+y2 <- np_sample$ihs_total_account_worth
+X2 <- data.frame(np_sample$ihs_group_connections,np_sample$ihs_new_connections_count,np_sample$ihs_existing_connections_count,np_sample$ihs_friends_avg_value)
+Z2 <- data.frame(np_sample$ihs_total_hours_played)
+
+bw2 <- npplregbw(xdat=X2, zdat=Z2, ydat=y2)
+pl2 <- npplreg(bws=bw2, y.eval=TRUE)
+
+#with controls
+y3 <- np_sample$ihs_total_account_worth
+X3 <- data.frame(np_sample$ihs_group_connections,np_sample$ihs_new_connections_count,np_sample$ihs_existing_connections_count,np_sample$ihs_friends_avg_value,np_sample$ihs_median_income_2010,np_sample$ihs_unemp_rate_2010,np_sample$ihs_age_comp_19_25,np_sample$locstatecode)
+Z3 <- data.frame(np_sample$ihs_total_hours_played)
+
+bw3 <- npplregbw(xdat=X3, zdat=Z3, ydat=y3)
+pl3 <- npplreg(bws=bw3, y.eval=TRUE)
+
+```
+
+## PLM reg estimates
+
+```{r}
+basic_para_all_linear <- lm(ihs_total_account_worth ~ ihs_new_connections_count +ihs_existing_connections_count +ihs_group_connections +ihs_friends_avg_value +ihs_total_hours_played, in_means_dat)
+
+summary(basic_para_all_linear)
+
+summary(pl)
+summary(pl1)
+coef(pl, errors=TRUE)
+coef(pl1,errors=TRUE)
+
+summary(pl2)
+summary(pl3)
+coef(pl2,errors=TRUE)
+coef(pl3,errors=TRUE)
+
+#RMSE calc, residuals not feeding through but MSE is provided
+MSE_pl <- sqrt(pl$MSE)
+MSE_pl1 <- sqrt(pl1$MSE)
+MSE_pl2 <- sqrt(pl2$MSE)
+MSE_pl3 <- sqrt(pl3$MSE)
+
+```
+
+## NP plots - run overnight
+
+```{r}
+y5 <- np_sample$ihs_total_account_worth
+X5 <- data.frame(np_sample$ihs_group_connections,np_sample$ihs_new_connections_count,np_sample$ihs_existing_connections_count)
+Z5 <- data.frame(np_sample$ihs_total_hours_played,np_sample$ihs_friends_avg_value)
+
+bw5 <- npplregbw(xdat=X5, zdat=Z5, ydat=y5)
+pl5 <- npplreg(bws=bw5, y.eval=TRUE)
+
+
+#big bootstrap (>100 resamples)
+pdf(file = "np_plots_both_nc_1_cht.pdf", width = 8, height = 16)
+g4 <- npplot(bws=bw5,
+       plot.errors.boot.num=400, 
+       plot.errors.method="bootstrap",
+       view=rotate)
+print(g4)
+dev.off()
+
+#quick sample check
+np_sample %>% select(c(3,28)) %>% filter(ihs_friends_avg_value <6.1 & ihs_friends_avg_value >0)
+np_sample %>% select(c(11,25)) %>% filter(ihs_total_hours_played <6.1 & ihs_total_hours_played >0)
+
+```
+
+
+# Robustness tests
+
+## Running regressions only focused on total hours played for paid games, not free to play
+
+```{r}
+#in means without heavyLm
+rc_im <- lm(ihs_total_account_worth ~ ihs_new_connections_count +ihs_existing_connections_count +ihs_group_connections +ihs_total_hours_played_paid, in_means_dat)
+
+rc_im1 <- lm(ihs_total_account_worth ~ ihs_new_connections_count +ihs_existing_connections_count +ihs_group_connections +ihs_total_hours_played_paid +ihs_friends_avg_value, in_means_dat)
+
+rc_im2 <- lm(ihs_total_account_worth ~ ihs_new_connections_count +ihs_existing_connections_count +ihs_group_connections +ihs_total_hours_played_paid +ihs_friends_avg_value +ihs_median_income_2010 +ihs_unemp_rate_2010 +ihs_age_comp_19_25 +locstatecode, in_means_dat)
+
+summary(rc_im)
+summary(rc_im1)
+summary(rc_im2)
+
+#in means with heavyLm
+rc_heavy_reg <- heavyLm(ihs_total_account_worth ~ ihs_new_connections_count +ihs_existing_connections_count +ihs_group_connections +ihs_total_hours_played_paid, data = in_means_dat)
+
+rc_heavy_reg1 <- heavyLm(ihs_total_account_worth ~ ihs_new_connections_count +ihs_existing_connections_count +ihs_group_connections +ihs_total_hours_played_paid +ihs_friends_avg_value, data = in_means_dat)
+
+rc_heavy_reg2  <- heavyLm(ihs_total_account_worth ~ ihs_new_connections_count +ihs_existing_connections_count +ihs_group_connections +ihs_total_hours_played_paid +ihs_friends_avg_value +ihs_median_income_2010 +ihs_unemp_rate_2010 +ihs_age_comp_19_25, data = in_means_dat)
+
+summary(rc_heavy_reg)
+summary(rc_heavy_reg1)
+summary(rc_heavy_reg2)
+
+#qregs 
+rc_qreg20 <- rq(ihs_total_account_worth ~ ihs_new_connections_count +ihs_existing_connections_count +ihs_friends_avg_value +ihs_group_connections +ihs_total_hours_played_paid  +ihs_median_income_2010 +ihs_unemp_rate_2010 +ihs_age_comp_19_25, in_means_dat, tau=0.2)
+
+rc_qreg40 <- rq(ihs_total_account_worth ~ ihs_new_connections_count +ihs_existing_connections_count +ihs_friends_avg_value +ihs_group_connections +ihs_total_hours_played_paid  +ihs_median_income_2010 +ihs_unemp_rate_2010 +ihs_age_comp_19_25, in_means_dat, tau=0.4)
+
+rc_qreg60 <- rq(ihs_total_account_worth ~ ihs_new_connections_count +ihs_existing_connections_count +ihs_friends_avg_value +ihs_group_connections +ihs_total_hours_played_paid  +ihs_median_income_2010 +ihs_unemp_rate_2010 +ihs_age_comp_19_25, in_means_dat, tau=0.6)
+
+rc_qreg80 <- rq(ihs_total_account_worth ~ ihs_new_connections_count +ihs_existing_connections_count +ihs_friends_avg_value +ihs_group_connections +ihs_total_hours_played_paid  +ihs_median_income_2010 +ihs_unemp_rate_2010 +ihs_age_comp_19_25, in_means_dat, tau=0.8)
+
+summary(rc_qreg20)
+summary(rc_qreg40)
+summary(rc_qreg60)
+summary(rc_qreg80)
+
+#NP as avg group outcome
+
+in_means_dat %>% mutate(locstatecode = as.factor(locstatecode)) -> np_sample
+  
+# no controls
+y <- np_sample$ihs_total_account_worth
+X <- data.frame(np_sample$ihs_group_connections,np_sample$ihs_new_connections_count,np_sample$ihs_existing_connections_count,np_sample$ihs_total_hours_played_paid)
+Z <- data.frame(np_sample$ihs_friends_avg_value)
+
+rc_bw <- npplregbw(xdat=X, zdat=Z, ydat=y)
+rc_pl <- npplreg(bws=rc_bw, y.eval=TRUE)
+
+# with controls
+y1 <- np_sample$ihs_total_account_worth
+X1 <- data.frame(np_sample$ihs_group_connections,np_sample$ihs_new_connections_count,np_sample$ihs_existing_connections_count,np_sample$ihs_total_hours_played_paid,np_sample$ihs_median_income_2010,np_sample$ihs_unemp_rate_2010,np_sample$ihs_age_comp_19_25,np_sample$locstatecode)
+Z1 <- data.frame(np_sample$ihs_friends_avg_value)
+
+rc_bw1 <- npplregbw(xdat=X1, zdat=Z1, ydat=y1)
+rc_pl1 <- npplreg(bws=rc_bw1, y.eval=TRUE)
+
+#NP as total hours played
+
+#no controls
+y2 <- np_sample$ihs_total_account_worth
+X2 <- data.frame(np_sample$ihs_group_connections,np_sample$ihs_new_connections_count,np_sample$ihs_existing_connections_count,np_sample$ihs_friends_avg_value)
+Z2 <- data.frame(np_sample$ihs_total_hours_played_paid)
+
+rc_bw2 <- npplregbw(xdat=X2, zdat=Z2, ydat=y2)
+rc_pl2 <- npplreg(bws=rc_bw2, y.eval=TRUE)
+
+#with controls
+y3 <- np_sample$ihs_total_account_worth
+X3 <- data.frame(np_sample$ihs_group_connections,np_sample$ihs_new_connections_count,np_sample$ihs_existing_connections_count,np_sample$ihs_friends_avg_value,np_sample$ihs_median_income_2010,np_sample$ihs_unemp_rate_2010,np_sample$ihs_age_comp_19_25,np_sample$locstatecode)
+Z3 <- data.frame(np_sample$ihs_total_hours_played_paid)
+
+rc_bw3 <- npplregbw(xdat=X3, zdat=Z3, ydat=y3)
+rc_pl3 <- npplreg(bws=rc_bw3, y.eval=TRUE)
+
+#summary stats plm
+rc_basic_para_all_linear <- lm(ihs_total_account_worth ~ ihs_new_connections_count +ihs_existing_connections_count +ihs_group_connections +ihs_friends_avg_value +ihs_total_hours_played_paid, in_means_dat)
+
+summary(rc_basic_para_all_linear)
+
+summary(rc_pl)
+summary(rc_pl1)
+coef(rc_pl, errors=TRUE)
+coef(rc_pl1,errors=TRUE)
+
+summary(rc_pl2)
+summary(rc_pl3)
+coef(rc_pl2,errors=TRUE)
+coef(rc_pl3,errors=TRUE)
+
+
+#np plots
+y6 <- np_sample$ihs_total_account_worth
+X6 <- data.frame(np_sample$ihs_group_connections,np_sample$ihs_new_connections_count,np_sample$ihs_existing_connections_count)
+Z6 <- data.frame(np_sample$ihs_total_hours_played_paid,np_sample$ihs_friends_avg_value)
+
+rc_bw6 <- npplregbw(xdat=X6, zdat=Z6, ydat=y6)
+rc_pl6 <- npplreg(bws=rc_bw6, y.eval=TRUE)
+
+#RUN OVERNIGHT
+#big bootstrap (>100 resamples)
+pdf(file = "rob_check_np_plots_both_nc_1_cht.pdf", width = 8, height = 16)
+g5 <- npplot(bws=rc_bw6,
+       plot.errors.boot.num=400, 
+       plot.errors.method="bootstrap",
+       view=rotate)
+print(g5)
+dev.off()
+
+```
+
+## Hours calculation
+
+```{r}
+#quick calc
+us_accounts %>% mutate(hours_diff = total_hours_played - total_hours_played_paid) -> hours_calc
+
+skim(hours_calc$hours_diff)
+stargazer(data.frame(hours_calc$hours_diff),type="html", digits=2, out="hours_calc.doc")
+
+psych::describe(hours_calc$hours_diff) #copy kurtosis and skew into paper
+
+```
+
