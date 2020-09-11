@@ -1,0 +1,1354 @@
+---
+title: "US recession"
+output:
+  html_document:
+    df_print: paged
+  word_document: default
+---
+
+#Prep
+
+Working directories are where data exists on my PC - each chunk with a specified directory will need changing to the path where the data is held (PC specific). All data available from: https://uob-my.sharepoint.com/:f:/g/personal/wm15380_bristol_ac_uk/EqV-zTEge_1NgpoSvkaY6goBGya8smaoEH5z5Noi1ortGw?e=nvJksw
+
+```{r include=FALSE}
+knitr::opts_chunk$set(comment = NA)
+knitr::opts_chunk$set(warning = FALSE)
+#knitr::opts_chunk$set(message = FALSE)
+```
+
+```{r, results=FALSE, message=FALSE, warning=FALSE, include=FALSE} 
+req_pack <- c("tidyverse","rmarkdown", "tinytex", "skimr", "lubridate", "RMariaDB", "DBI", "bigmemory", "bigtabulate", "biganalytics", "synchronicity", "ff", "ffbase", "patchwork", "hts", "ggseas", "tseries", "miceadds", "plm", "rddtools", "haven") 
+new_pack <- req_pack[!(req_pack %in% installed.packages()[,"Package"])] 
+
+if(length(new_pack)) install.packages(new_pack) 
+
+for(package in req_pack){ 
+  library(package,character.only = TRUE) 
+} 
+
+options(scipen = 100000)
+```
+
+
+# Importing SQL accounts data 
+
+## US
+
+```{r}
+setwd("C:/Users/JANGO/Desktop/MySQL/csv_exports/large_scale/player_summaries")
+
+player_summaries_us <- read.csv("player_summaries_us.csv", header=FALSE)
+colnames(player_summaries_us) <- c("steamid", "timecreated", "loccountrycode", "locstatecode", "loccityid")
+
+#dropping observations with no state given, 2.3mn obs down to 1,479,971
+player_summaries_us <- player_summaries_us[!(player_summaries_us$locstatecode =="NULL"),]
+# player_summaries_us <- player_summaries_us[!(player_summaries_us$loccityid =="NULL"),]
+
+#formatting dates
+player_summaries_us %>%
+  mutate(timecreated = as.Date(timecreated)) %>%
+  arrange(timecreated) -> player_summaries_us
+
+#adding custom formatted dates, merging requires too much memory, extract the order of the dataset and build dates around this, then bind column back into dataset
+dates <- player_summaries_us$timecreated
+date_month <- data.frame(Dates = dates, Month = format(dates, format = "%Y/%m"))
+
+cbind(player_summaries_us, date_month) %>% select(-c(Dates)) -> player_summaries_us_a
+rm(date_month, dates)
+
+player_summaries_us_a %>% group_by(locstatecode) %>% count(Month) %>%
+  rename(account_creation_tally = "n") -> grouped_state_monthly_tally_us
+
+#generating discontinuity window - pre and post
+grouped_state_monthly_tally_us %>%
+  mutate(pre_1month = ifelse(Month == "2007/12", 1, 0),
+         post_1month= ifelse(Month == "2009/06", 1, 0),
+         pre_6month = ifelse(Month >= "2007/06" & Month <= "2007/12", 1, 0),
+         post_6month= ifelse(Month >= "2009/06" & Month <= "2009/12", 1, 0),
+         pre_1year  = ifelse(Month >= "2006/12" & Month <= "2007/12", 1, 0),
+         post_1year = ifelse(Month >= "2009/06" & Month <= "2010/06", 1, 0),
+         during     = ifelse(Month >  "2007/12" & Month <  "2009/06", 1, 0 )) -> grouped_state_monthly_tally_us
+
+
+disc_state_monthly_tally <- grouped_state_monthly_tally_us %>%
+  mutate(per_ind = ifelse(pre_1month ==1 | post_1month ==1 | 
+                            pre_6month ==1 | post_6month ==1 |
+                            pre_1year ==1 | post_1year ==1 |
+                            during ==1, 1, 0))
+
+disc_state_monthly_tally <- disc_state_monthly_tally[!(disc_state_monthly_tally$per_ind==0),]
+disc_state_monthly_tally <- disc_state_monthly_tally %>% select(-c(per_ind))
+
+disc_state_monthly_tally <- disc_state_monthly_tally %>% filter(locstatecode != "PR")
+
+
+```
+
+
+# DAILY -  Data load in for RDD - daily accounts
+
+
+```{r}
+player_summaries_us %>% group_by(locstatecode) %>% count(timecreated) %>%
+  rename(account_creation_tally = "n") -> grouped_state_daily_tally_us
+
+#generating discontinuity window - pre and post
+grouped_state_daily_tally_us %>%
+  mutate(pre_30 = ifelse(timecreated >= "2007-12-01" & timecreated <= "2007-12-31", 1, 0),
+         pre_30_b = ifelse(timecreated >= "2008-01-01" & timecreated <= "2008-01-31", 1, 0),
+         post_30= ifelse(timecreated >= "2009-06-01" & timecreated <= "2009-06-30", 1, 0),
+         post_30_a = ifelse(timecreated >= "2009-05-01" & timecreated <= "2009-05-31", 1, 0),
+         pre_180 = ifelse(timecreated >= "2007-06-01" & timecreated <= "2007-12-31", 1, 0),
+         pre_180_b = ifelse(timecreated >= "2008-01-01" & timecreated <= "2008-06-01", 1, 0),
+         post_180= ifelse(timecreated >= "2009-06-01" & timecreated <= "2009-12-31", 1, 0),
+         post_180_a= ifelse(timecreated >= "2009-01-01" & timecreated <= "2009-05-31", 1, 0),
+         pre_360  = ifelse(timecreated >= "2006-12-01" & timecreated <= "2007-12-31", 1, 0),
+         pre_360_b  = ifelse(timecreated >= "2008-01-01" & timecreated <= "2009-01-01", 1, 0),
+         post_360 = ifelse(timecreated >= "2009-06-01" & timecreated <= "2010-06-01", 1, 0),
+         post_360_a = ifelse(timecreated >= "2008-06-01" & timecreated <= "2009-05-31", 1, 0),
+         during     = ifelse(timecreated >  "2007-12-31" & timecreated <  "2009-06-01", 1, 0 )) -> grouped_state_daily_tally_us
+
+
+disc_state_daily_tally <- grouped_state_daily_tally_us %>%
+  mutate(per_ind = ifelse(pre_30 ==1 | pre_30_b ==1 | post_30 ==1 | post_30_a ==1 | 
+                            pre_180 ==1 | pre_180_b ==1 | post_180 ==1 | post_180_a ==1 |
+                            pre_360 ==1 | pre_360_b ==1 | post_360 ==1 | post_360_a ==1 |
+                            during ==1, 1, 0))
+
+disc_state_daily_tally <- disc_state_daily_tally[!(disc_state_daily_tally$per_ind==0),]
+disc_state_daily_tally <- disc_state_daily_tally %>% select(-c(per_ind))
+
+disc_state_daily_tally <- disc_state_daily_tally %>% filter(locstatecode != "PR")
+```
+
+## RDD controls - population
+
+```{r}
+setwd("C:/Users/JANGO/OneDrive - University of Bristol/Documents/MSc Dissertation/Data/population")
+#weighting by state population as of April 1 2010 from the census. Data from https://www.census.gov/data/tables/time-series/demo/popest/2010s-state-total.html
+pop_2010 <- read.csv("nst-est2019-01mod.csv", header=FALSE, skip=2) %>% select(-c(V1,V2)) 
+colnames(pop_2010) <- c("locstatecode", "weighted_pop")
+
+pop_2010[-c(52:54),] -> pop_2010 #blank rows
+
+disc_state_daily_tally <- left_join(disc_state_daily_tally, pop_2010, by="locstatecode") %>%
+  mutate(weighted_account_creation = account_creation_tally*weighted_pop)
+
+rm(pop_2010)
+```
+
+## RDD controls - unemployment, med income, age, politics, output and education
+
+```{r}
+setwd("C:/Users/JANGO/OneDrive - University of Bristol/Documents/MSc Dissertation/Data/controls")
+
+#median income
+medincome_2010 <- read.csv("median_income_us_2010.csv", skip =1, header=FALSE)
+colnames(medincome_2010) <- c("locstatecode", "median_income")
+
+disc_state_daily_tally <- left_join(disc_state_daily_tally, medincome_2010, by="locstatecode")
+
+#unemployment
+unemp_2010 <- read.csv("state_unemp_2010.csv", skip =1,  header=FALSE) %>% select(V2,V15)
+colnames(unemp_2010) <- c("locstatecode", "2010_unemp_rate")
+
+disc_state_daily_tally <- left_join(disc_state_daily_tally, unemp_2010, by="locstatecode") %>%
+  rename(unemp_rate_2010 = "2010_unemp_rate") %>%
+  rename(median_income_2010 = "median_income")
+
+#age composition
+age_comp_2010 <- read.csv("age_comp_19_25.csv", header=FALSE)
+colnames(age_comp_2010) <- c("locstatecode", "age_comp_19_25")
+
+disc_state_daily_tally <- left_join(disc_state_daily_tally, age_comp_2010, by="locstatecode")
+
+#election result
+election_2008 <- read.csv("2008_election.csv", header=FALSE)
+colnames(election_2008) <- c("locstatecode", "bin_outcome")
+
+election_2008 %>% mutate(ifelse(bin_outcome==2, "Blue", ifelse(bin_outcome==1, "Red", 0))) %>% 
+  {colnames(.)[3] = "outcome"; .} %>%
+  select("locstatecode", "outcome") -> election_2008
+
+election_2008[1,1] = "AL"
+
+disc_state_daily_tally <- left_join(disc_state_daily_tally, election_2008, by="locstatecode")
+
+#state output - https://dataverse.harvard.edu/dataset.xhtml?persistentId=doi:10.7910/DVN/CJBTGD
+state_output <- read_dta("state_economics.dta")
+state_output %>% filter(year==2010, quar==1.0, statename!="United States") %>%
+  select("stateabrev", "gsp") %>%
+  rename(locstatecode = "stateabrev") -> state_output
+
+disc_state_daily_tally <- left_join(disc_state_daily_tally, state_output, by="locstatecode")
+
+#education
+education_2010 <- read.csv("education_2010.csv", header=FALSE)
+colnames(education_2010) <- c("locstatecode", "hs_completers_2010")
+education_2010[1,1] = "AL"
+
+disc_state_daily_tally <- left_join(disc_state_daily_tally, education_2010, by="locstatecode")
+
+
+rm(medincome_2010, unemp_2010, age_comp_2010, election_2008, state_output, education_2010)
+```
+
+
+## RDD daily 30/180/360 discontinuities and hi-res plot for CA
+
+```{r}
+#30 days
+rdd_30_pre <- disc_state_daily_tally %>%
+  mutate(ln_weighted_account_creation = log(weighted_account_creation)) %>%
+  filter(pre_30 ==1 | pre_30_b ==1) %>%
+  select(-c(6:16)) %>% 
+  ungroup() 
+
+rdd_30_post <- disc_state_daily_tally %>%
+  mutate(ln_weighted_account_creation = log(weighted_account_creation)) %>%
+  filter(post_30 ==1 | post_30_a ==1) %>%
+  select(-c(4:5,8:16)) %>% 
+  ungroup() 
+
+#180 days
+rdd_180_pre <- disc_state_daily_tally %>%
+  mutate(ln_weighted_account_creation = log(weighted_account_creation)) %>%
+  filter(pre_180 ==1 | pre_180_b ==1) %>%
+  select(-c(4:7,10:16)) %>%
+  ungroup() 
+
+rdd_180_post <- disc_state_daily_tally %>%
+  mutate(ln_weighted_account_creation = log(weighted_account_creation)) %>%
+  filter(post_180 ==1 | post_180_a ==1) %>%
+  select(-c(4:9,12:16)) %>%
+  ungroup() 
+
+#360 days
+rdd_360_pre <- disc_state_daily_tally %>%
+  mutate(ln_weighted_account_creation = log(weighted_account_creation)) %>%
+  filter(pre_360 ==1  | pre_360_b ==1) %>% 
+  select(-c(4:11,14:16)) %>%
+  ungroup()
+
+rdd_360_post <- disc_state_daily_tally %>%
+  mutate(ln_weighted_account_creation = log(weighted_account_creation)) %>%
+  filter(post_360 ==1  | post_360_a ==1) %>% 
+  select(-c(4:13,16)) %>%
+  ungroup()
+
+
+
+## CA plot
+rdd_360 <- disc_state_daily_tally %>%
+  mutate(ln_weighted_account_creation = log(weighted_account_creation)) %>%
+  filter(pre_360 ==1 | during ==1 | post_360 ==1)
+
+
+rdd_plot_data_CA <- rdd_360 %>%
+  filter(locstatecode =="CA") %>%
+  select("locstatecode", "timecreated", "account_creation_tally", "weighted_account_creation", "pre_360", "post_360", "during", "ln_weighted_account_creation") %>%
+  group_by(locstatecode) %>%
+  mutate(order = 1:n()) %>%
+  mutate(order = as.numeric(order))
+
+rdd_plot_data_CA %>% mutate(rd_fact = ifelse(pre_360==1,"Pre",
+                                     ifelse(during==1,"During",
+                                      ifelse(post_360==1,"Post",0)))) %>% mutate(rd_fact=as.factor(rd_fact)) -> rdd_plot_data_CA
+
+# Define positions of vline
+dates_vline <- as.Date(c("2007-12-31", "2009-06-01"))                 
+dates_vline <- which(rdd_plot_data_CA$timecreated %in% dates_vline)
+
+ggplot(rdd_plot_data_CA, aes(timecreated, ln_weighted_account_creation, color = factor(rd_fact))) +
+  geom_point(cex=.3, alpha=0.4)+
+  geom_smooth(span=2, se=TRUE)+
+  geom_vline(xintercept = as.numeric(rdd_plot_data_CA$timecreated[dates_vline]),linetype=3)+
+  theme_minimal()+
+  labs(x="", y= "Accounts created (per capita, log transformed)", title="CA", color="Period")+
+  scale_color_manual(values=c("#D55E00", "#E69F00", "#56B4E9"))
+
+ggplot(rdd_plot_data_CA, aes(timecreated, ln_weighted_account_creation, color = factor(rd_fact))) +
+  geom_point(cex=.3, alpha=0.4)+
+  geom_smooth(span=2, se=TRUE)+
+  geom_vline(xintercept = as.numeric(rdd_plot_data_CA$timecreated[dates_vline]),linetype=3)+
+  theme_minimal()+
+  labs(x="", y= "Accounts created (per capita, log transformed)", title="CA", color="Period")+
+  scale_color_manual(values=c("#D55E00", "#E69F00", "#56B4E9")) -> p3
+ 
+```
+
+## RDD plot for top 4 states (excl CA)
+
+```{r}
+rdd_plot_data4 <- rdd_360 %>%
+  filter(locstatecode =="TX" | locstatecode=="FL" | locstatecode=="NY" | locstatecode=="IL") %>%
+  select("locstatecode", "timecreated", "account_creation_tally", "weighted_account_creation", "pre_360", "post_360", "during", "ln_weighted_account_creation") %>%
+  group_by(locstatecode) %>%
+  mutate(order = 1:n()) %>%
+  mutate(order = as.numeric(order))
+
+rdd_plot_data4 %>% mutate(rd_fact = ifelse(pre_360==1,"Pre",
+                                     ifelse(during==1,"During",
+                                      ifelse(post_360==1,"Post",0)))) %>% mutate(rd_fact=as.factor(rd_fact)) -> rdd_plot_data4
+
+# Define positions of vline
+dates_vline <- as.Date(c("2007-12-31", "2009-06-01"))                 
+dates_vline <- which(rdd_plot_data4$timecreated %in% dates_vline)
+
+ggplot(rdd_plot_data4, aes(timecreated, ln_weighted_account_creation, color = factor(rd_fact))) +
+  geom_point(cex=.3, alpha=.2)+
+  geom_smooth(span=2, se=TRUE)+
+  geom_vline(xintercept = as.numeric(rdd_plot_data4$timecreated[dates_vline]),linetype=3)+
+  theme_minimal()+
+  labs(x="", y= "Accounts created (per capita, log transformed)", color="Period")+
+  scale_color_manual(values=c("#D55E00", "#E69F00", "#56B4E9"))+
+  facet_wrap(~locstatecode)
+
+```
+
+## RDD plot 360 no during
+
+```{r}
+disc_state_daily_tally %>% filter(during==0) -> pre_post_daily
+
+rdd_360_2 <- pre_post_daily %>%
+  mutate(ln_weighted_account_creation = log(weighted_account_creation)) %>%
+  filter(pre_360 ==1  | post_360  ==1) %>%
+  select(-c(4:7)) %>%
+  ungroup()
+
+rdd_plot_data3 <- rdd_360_2 %>%
+  filter(locstatecode =="CA") %>%
+  select("locstatecode", "timecreated", "account_creation_tally", "weighted_account_creation", "pre_360", "post_360", "during", "ln_weighted_account_creation") %>%
+  group_by(locstatecode) %>%
+  mutate(order = 1:n()) %>%
+  mutate(order = as.numeric(order))
+
+rdd_plot_data3 %>% mutate(rd_fact = ifelse(pre_360==1,"Pre",
+                                      ifelse(post_360==1,"Post",0))) %>% mutate(rd_fact=as.factor(rd_fact)) -> rdd_plot_data3
+
+# Define positions of vline
+threshold=396.5
+
+ggplot(rdd_plot_data3, aes(order, ln_weighted_account_creation, color = factor(rd_fact))) +
+  geom_point(cex=.3)+
+  geom_smooth(span=2, se=TRUE)+
+  geom_vline(xintercept = c(threshold),linetype=3)+
+  theme_minimal()+
+  labs(x="", y= "Accounts created (per capita, log transformed)", title="CA", color="Period")+
+  scale_color_manual(values=c("#E69F00", "#56B4E9"))
+
+```
+
+## RDD plots to eval fit - linear, 2nd/3rd/4th-order polynomial
+
+```{r}
+#all periods
+#1st-order/linear
+ggplot(rdd_plot_data_CA, aes(timecreated, ln_weighted_account_creation, color = factor(rd_fact))) +
+  geom_point(cex=.3, alpha=0.4)+
+  geom_smooth(method="lm", se=TRUE)+
+  geom_vline(xintercept = as.numeric(rdd_plot_data_CA$timecreated[dates_vline]),linetype=3)+
+  theme_minimal()+
+  labs(x="", y= "Accounts created (per capita, log transformed)", title="CA", color="Period")+
+  scale_color_manual(values=c("#D55E00", "#E69F00", "#56B4E9"))
+
+#2nd-order
+ggplot(rdd_plot_data_CA, aes(timecreated, ln_weighted_account_creation, color = factor(rd_fact))) +
+  geom_point(cex=.3, alpha=0.4)+
+  geom_smooth(method="lm", formula= y ~ poly(x,2))+
+  geom_vline(xintercept = as.numeric(rdd_plot_data_CA$timecreated[dates_vline]),linetype=3)+
+  theme_minimal()+
+  labs(x="", y= "Accounts created (per capita, log transformed)", title="CA", color="Period")+
+  scale_color_manual(values=c("#D55E00", "#E69F00", "#56B4E9"))
+
+#3rd-order
+ggplot(rdd_plot_data_CA, aes(timecreated, ln_weighted_account_creation, color = factor(rd_fact))) +
+  geom_point(cex=.3, alpha=0.4)+
+  geom_smooth(method="lm", formula= y ~ poly(x,3))+
+  geom_vline(xintercept = as.numeric(rdd_plot_data_CA$timecreated[dates_vline]),linetype=3)+
+  theme_minimal()+
+  labs(x="", y= "Accounts created (per capita, log transformed)", title="CA", color="Period")+
+  scale_color_manual(values=c("#D55E00", "#E69F00", "#56B4E9"))
+
+#4th-order
+ggplot(rdd_plot_data_CA, aes(timecreated, ln_weighted_account_creation, color = factor(rd_fact))) +
+  geom_point(cex=.3, alpha=0.4)+
+  geom_smooth(method="lm", formula= y ~ poly(x,4))+
+  geom_vline(xintercept = as.numeric(rdd_plot_data_CA$timecreated[dates_vline]),linetype=3)+
+  theme_minimal()+
+  labs(x="", y= "Accounts created (per capita, log transformed)", title="CA", color="Period")+
+  scale_color_manual(values=c("#D55E00", "#E69F00", "#56B4E9"))
+
+#5th-order
+ggplot(rdd_plot_data_CA, aes(timecreated, ln_weighted_account_creation, color = factor(rd_fact))) +
+  geom_point(cex=.3, alpha=0.4)+
+  geom_smooth(method="lm", formula= y ~ poly(x,5))+
+  geom_vline(xintercept = as.numeric(rdd_plot_data_CA$timecreated[dates_vline]),linetype=3)+
+  theme_minimal()+
+  labs(x="", y= "Accounts created (per capita, log transformed)", title="CA", color="Period")+
+  scale_color_manual(values=c("#D55E00", "#E69F00", "#56B4E9"))
+
+#no during period
+#1st-order/linear
+ggplot(rdd_plot_data3, aes(order, ln_weighted_account_creation, color = factor(rd_fact))) +
+  geom_point(cex=.3)+
+  geom_smooth(method="lm", formula= y ~ poly(x,1))+
+  geom_vline(xintercept = c(threshold),linetype=3)+
+  theme_minimal()+
+  labs(x="", y= "Accounts created (per capita, log transformed)", title="CA", color="Period")+
+  scale_color_manual(values=c("#E69F00", "#56B4E9"))
+
+#2nd-order
+ggplot(rdd_plot_data3, aes(order, ln_weighted_account_creation, color = factor(rd_fact))) +
+  geom_point(cex=.3)+
+  geom_smooth(method="lm", formula= y ~ poly(x,2))+
+  geom_vline(xintercept = c(threshold),linetype=3)+
+  theme_minimal()+
+  labs(x="", y= "Accounts created (per capita, log transformed)", title="CA", color="Period")+
+  scale_color_manual(values=c("#E69F00", "#56B4E9"))
+
+#3rd-order
+ggplot(rdd_plot_data3, aes(order, ln_weighted_account_creation, color = factor(rd_fact))) +
+  geom_point(cex=.3)+
+  geom_smooth(method="lm", formula= y ~ poly(x,3))+
+  geom_vline(xintercept = c(threshold),linetype=3)+
+  theme_minimal()+
+  labs(x="", y= "Accounts created (per capita, log transformed)", title="CA", color="Period")+
+  scale_color_manual(values=c("#E69F00", "#56B4E9"))
+#4th-order
+ggplot(rdd_plot_data3, aes(order, ln_weighted_account_creation, color = factor(rd_fact))) +
+  geom_point(cex=.3)+
+  geom_smooth(method="lm", formula= y ~ poly(x,4))+
+  geom_vline(xintercept = c(threshold),linetype=3)+
+  theme_minimal()+
+  labs(x="", y= "Accounts created (per capita, log transformed)", title="CA", color="Period")+
+  scale_color_manual(values=c("#E69F00", "#56B4E9"))
+#5th-order
+ggplot(rdd_plot_data3, aes(order, ln_weighted_account_creation, color = factor(rd_fact))) +
+  geom_point(cex=.3)+
+  geom_smooth(method="lm", formula= y ~ poly(x,5))+
+  geom_vline(xintercept = c(threshold),linetype=3)+
+  theme_minimal()+
+  labs(x="", y= "Accounts created (per capita, log transformed)", title="CA", color="Period")+
+  scale_color_manual(values=c("#E69F00", "#56B4E9"))
+
+```
+
+
+#NOREC
+
+## PRE/POST RDD estimation - norec - 360 days
+
+```{r}
+disc_state_daily_tally %>%
+  mutate(ln_weighted_account_creation = log(weighted_account_creation)) %>%
+  filter(pre_360 ==1 | post_360 ==1) %>%
+  select(-c(4:11,13,15)) %>% 
+  ungroup() %>%
+  group_by(locstatecode) %>%
+  mutate(order = 1:n()) %>%
+  mutate(order = as.numeric(order)) %>%
+  ungroup() %>%
+  mutate(outcome = as.factor(outcome))-> test7
+
+y <- test7$ln_weighted_account_creation
+W <- test7$order
+
+X1 <- as.numeric(test7$median_income_2010)
+X2 <- test7$unemp_rate_2010
+X3 <- test7$age_comp_19_25
+X4 <- test7$outcome
+X5 <- test7$gsp
+X6 <- test7$hs_completers_2010
+X7 <- test7$locstatecode
+
+covariates7<-data.frame(x1=X1, x2=X2, x3=X3, x4=X4, x5=X5, x6=X6, x7=X7)
+
+rdd_360_norec_data <- rdd_data(y = ln_weighted_account_creation, x=order, covar=covariates7, cutpoint = 375.5, data=test7)
+rdd_mod_360_norec <- rdd_reg_lm(rdd_object = rdd_360_norec_data, covariates=X6, slope="separate",covar.opt = list("include"),order=2)
+
+rdd_360_norec_data_nc <- rdd_data(y = ln_weighted_account_creation, x=order, cutpoint = 375.5, data=test7)
+rdd_mod_nc_360_norec <- rdd_reg_lm(rdd_object = rdd_360_norec_data_nc, slope="separate", order=2)
+
+summary(rdd_mod_360_norec)
+summary(rdd_mod_nc_360_norec)
+```
+
+
+
+## PRE/POST RDD estimation - norec - 180 days
+
+```{r}
+disc_state_daily_tally %>%
+  mutate(ln_weighted_account_creation = log(weighted_account_creation)) %>%
+  filter(pre_180 ==1 | post_180 ==1) %>%
+  select(-c(4:7,9,11:16)) %>% 
+  ungroup() %>%
+  group_by(locstatecode) %>%
+  mutate(order = 1:n()) %>%
+  mutate(order = as.numeric(order)) %>%
+  ungroup() %>%
+  mutate(outcome = as.factor(outcome))-> test8
+
+y <- test8$ln_weighted_account_creation
+W <- test8$order
+
+X1 <- as.numeric(test8$median_income_2010)
+X2 <- test8$unemp_rate_2010
+X3 <- test8$age_comp_19_25
+X4 <- test8$outcome
+X5 <- test8$gsp
+X6 <- test8$hs_completers_2010
+X7 <- test8$locstatecode
+
+covariates8<-data.frame(x1=X1, x2=X2, x3=X3, x4=X4, x5=X5, x6=X6, x7=X7)
+
+rdd_180_norec_data <- rdd_data(y = ln_weighted_account_creation, x=order, covar=covariates8, cutpoint = 205.5, data=test8)
+rdd_mod_180_norec <- rdd_reg_lm(rdd_object = rdd_180_norec_data, covariates=X6, slope="separate",covar.opt= list("include"),order=2)
+
+rdd_180_norec_data_nc <- rdd_data(y = ln_weighted_account_creation, x=order, cutpoint = 205.5, data=test8)
+rdd_mod_nc_180_norec <- rdd_reg_lm(rdd_object = rdd_180_norec_data_nc, slope="separate", order=2)
+
+summary(rdd_mod_180_norec)
+summary(rdd_mod_nc_180_norec)
+```
+
+
+
+## PRE/POST RDD estimation - norec - 30 days
+
+```{r}
+disc_state_daily_tally %>%
+  mutate(ln_weighted_account_creation = log(weighted_account_creation)) %>%
+  filter(pre_30 ==1 | post_30 ==1) %>%
+  select(-c(5,7:16)) %>% 
+  ungroup() %>%
+  group_by(locstatecode) %>%
+  mutate(order = 1:n()) %>%
+  mutate(order = as.numeric(order)) %>%
+  ungroup() %>%
+  mutate(outcome = as.factor(outcome))-> test9
+
+y <- test9$lnweighted_account_creation
+W <- test9$order
+
+X1 <- as.numeric(test9$median_income_2010)
+X2 <- test9$unemp_rate_2010
+X3 <- test9$age_comp_19_25
+X4 <- test9$outcome
+X5 <- test9$gsp
+X6 <- test9$hs_completers_2010
+X7 <- test9$locstatecode
+
+covariates9<-data.frame(x1=X1, x2=X2, x3=X3, x4=X4, x5=X5, x6=X6, x7=X7)
+
+rdd_30_norec_data <- rdd_data(y = ln_weighted_account_creation, x=order, covar=covariates9, cutpoint = 28.5, data=test9)
+rdd_mod_30_norec <- rdd_reg_lm(rdd_object = rdd_30_norec_data, covariates=X6, slope="separate",covar.opt= list("include"),order=2)
+
+rdd_30_norec_data_nc <- rdd_data(y = ln_weighted_account_creation, x=order, cutpoint = 28.5, data=test9)
+rdd_mod_nc_30_norec <- rdd_reg_lm(rdd_object = rdd_30_norec_data_nc, slope="separate", order=2)
+
+summary(rdd_mod_30_norec)
+summary(rdd_mod_nc_30_norec)
+
+```
+
+
+
+# REC
+
+## PRE/POST RDD estimation - 360 days
+
+```{r}
+#Pre-recession
+rdd_360_pre %>%
+  group_by(locstatecode) %>%
+  mutate(order = 1:n()) %>%
+  mutate(order = as.numeric(order)) %>%
+  ungroup() %>%
+  mutate(outcome = as.factor(outcome))-> test
+
+y <- test$ln_weighted_account_creation
+W <- test$order
+
+X1 <- as.numeric(test$median_income_2010)
+X2 <- test$unemp_rate_2010
+X3 <- test$age_comp_19_25
+X4 <- test$outcome
+X5 <- test$gsp
+X6 <- test$hs_completers_2010
+X7 <- test$locstatecode
+
+covariates<-data.frame(x1=X1, x2=X2, x3=X3, x4=X4, x5=X5, x6=X6, x7=X7)
+
+rdd_360_pre_data <- rdd_data(y = ln_weighted_account_creation, x=order, covar=covariates, cutpoint = 329.5, data=test)
+rdd_mod_360_pre <- rdd_reg_lm(rdd_object = rdd_360_pre_data, covariates=X6, slope="separate",covar.opt = list("include"),order=2)
+
+rdd_360_pre_data_nc <- rdd_data(y = ln_weighted_account_creation, x=order, cutpoint = 329.5, data=test)
+rdd_mod_nc_360_pre <- rdd_reg_lm(rdd_object = rdd_360_pre_data_nc, slope="separate", order=2)
+
+
+
+# McCrary test
+# dens_test(rdd_360_pre_data, bin=25)
+
+
+summary(rdd_mod_360_pre)
+summary(rdd_mod_nc_360_pre)
+#slightly higher r-squared with 2nd order, better fit for the data
+
+
+#Post recession
+rdd_360_post %>%
+  group_by(locstatecode) %>%
+  mutate(order = 1:n()) %>%
+  mutate(order = as.numeric(order)) %>%
+  mutate(outcome = as.factor(outcome)) -> test2
+
+y <- test2$ln_weighted_account_creation
+W <- test2$order
+
+X1 <- as.numeric(test2$median_income_2010)
+X2 <- test2$unemp_rate_2010
+X3 <- test2$age_comp_19_25
+X4 <- test2$outcome
+X5 <- test2$gsp
+X6 <- test2$hs_completers_2010
+X7 <- test2$locstatecode
+
+covariates2<-data.frame(x1=X1, x2=X2, x3=X3, x4=X4, x5=X5, x6=X6, x7=X7)
+
+rdd_360_post_data <- rdd_data(y = ln_weighted_account_creation, x=order, covar=covariates2, cutpoint = 350.5, data=test2)
+rdd_mod_360_post <- rdd_reg_lm(rdd_object = rdd_360_post_data, covariates=X6, slope="separate",covar.opt = list("include"), order=2)
+
+rdd_360_nc_post_data <- rdd_data(y = ln_weighted_account_creation, x=order, cutpoint = 350.5, data=test2)
+rdd_mod_nc_360_post <- rdd_reg_lm(rdd_object = rdd_360_post_data, slope="separate", order=2)
+
+summary(rdd_mod_360_post)
+summary(rdd_mod_nc_360_post)
+
+```
+
+## PRE/POST RDD estimation - 180 days
+
+```{r}
+#Pre-recession
+rdd_180_pre %>%
+  group_by(locstatecode) %>%
+  mutate(order = 1:n()) %>%
+  mutate(order = as.numeric(order)) %>%
+  mutate(outcome = as.factor(outcome)) -> test3
+
+y <- test3$ln_weighted_account_creation
+W <- test3$order
+
+X1 <- as.numeric(test3$median_income_2010)
+X2 <- test3$unemp_rate_2010
+X3 <- test3$age_comp_19_25
+X4 <- test3$outcome
+X5 <- test3$gsp
+X6 <- test3$hs_completers_2010
+X7 <- test3$locstatecode
+
+covariates3<-data.frame(x1=X1, x2=X2, x3=X3, x4=X4, x5=X5, x6=X6, x7=X7)
+
+rdd_180_pre_data <- rdd_data(y = ln_weighted_account_creation, x=order, covar=covariates3, cutpoint = 189.5, data=test3)
+rdd_mod_180_pre <- rdd_reg_lm(rdd_object = rdd_180_pre_data, covariates=X6, slope="separate",covar.opt = list("include"),order=2)
+
+rdd_180_nc_pre_data<- rdd_data(y = ln_weighted_account_creation, x=order, cutpoint = 189.5, data=test3)
+rdd_mod_nc_180_pre <- rdd_reg_lm(rdd_object = rdd_180_nc_pre_data, slope="separate",order=2)
+
+
+summary(rdd_mod_180_pre)
+summary(rdd_mod_nc_180_pre)
+
+#Post recession
+rdd_180_post %>%
+  group_by(locstatecode) %>%
+  mutate(order = 1:n()) %>%
+  mutate(order = as.numeric(order)) %>%
+  mutate(outcome = as.factor(outcome)) -> test4
+
+y <- test4$ln_weighted_account_creation
+W <- test4$order
+
+X1 <- as.numeric(test4$median_income_2010)
+X2 <- test4$unemp_rate_2010
+X3 <- test4$age_comp_19_25
+X4 <- test4$outcome
+X5 <- test4$gsp
+X6 <- test4$hs_completers_2010
+X7 <- test4$locstatecode
+
+covariates4<-data.frame(x1=X1, x2=X2, x3=X3, x4=X4, x5=X5, x6=X6, x7=X7)
+
+rdd_180_post_data <- rdd_data(y = ln_weighted_account_creation, x=order, covar=covariates4, cutpoint = 148.5, data=test4)
+rdd_mod_180_post <- rdd_reg_lm(rdd_object = rdd_180_post_data, covariates=X6, slope="separate",covar.opt = list("include"),order=2)
+
+rdd_180_nc_post_data <- rdd_data(y = ln_weighted_account_creation, x=order, cutpoint = 148.5, data=test4)
+rdd_mod_nc_180_post <- rdd_reg_lm(rdd_object = rdd_180_nc_post_data, slope="separate",order=2)
+
+summary(rdd_mod_180_post)
+summary(rdd_mod_nc_180_post)
+```
+
+
+
+
+## PRE/POST RDD estimation - 30 days
+
+```{r}
+#Pre-recession
+rdd_30_pre %>%
+  group_by(locstatecode) %>%
+  mutate(order = 1:n()) %>%
+  mutate(order = as.numeric(order)) %>%
+  mutate(outcome = as.factor(outcome)) -> test5
+
+y <- test5$ln_weighted_account_creation
+W <- test5$order
+
+X1 <- as.numeric(test5$median_income_2010)
+X2 <- test5$unemp_rate_2010
+X3 <- test5$age_comp_19_25
+X4 <- test5$outcome
+X5 <- test5$gsp
+X6 <- test5$hs_completers_2010
+X7 <- test5$locstatecode
+
+covariates5<-data.frame(x1=X1, x2=X2, x3=X3, x4=X4, x5=X5, x6=X6, x7=X7)
+
+rdd_30_post_data <- rdd_data(y = ln_weighted_account_creation, x=order, covar=covariates5, cutpoint = 28.5, data=test5)
+rdd_mod_30_post <- rdd_reg_lm(rdd_object = rdd_30_post_data, covariates=X6, slope="separate",covar.opt = list("include"),order=2)
+
+rdd_30_nc_pre_data <- rdd_data(y = ln_weighted_account_creation, x=order, cutpoint = 28.5, data=test5)
+rdd_mod_nc_30_pre <- rdd_reg_lm(rdd_object = rdd_30_nc_pre_data, slope="separate",order=2)
+
+summary(rdd_mod_30_post)
+summary(rdd_mod_nc_30_pre)
+
+
+
+
+#Post recession
+rdd_30_post %>%
+  group_by(locstatecode) %>%
+  mutate(order = 1:n()) %>%
+  mutate(order = as.numeric(order)) %>%
+  mutate(outcome = as.factor(outcome)) -> test6
+
+y <- test6$ln_weighted_account_creation
+W <- test6$order
+
+X1 <- as.numeric(test6$median_income_2010)
+X2 <- test6$unemp_rate_2010
+X3 <- test6$age_comp_19_25
+X4 <- test6$outcome
+X5 <- test6$gsp
+X6 <- test6$hs_completers_2010
+X7 <- test6$locstatecode
+
+covariates6<-data.frame(x1=X1, x2=X2, x3=X3, x4=X4, x5=X5, x6=X6, x7=X7)
+
+rdd_30_post_data <- rdd_data(y = ln_weighted_account_creation, x=order, covar=covariates6, cutpoint = 31.5, data=test6)
+rdd_mod_30_post <- rdd_reg_lm(rdd_object = rdd_30_post_data, covariates=X6, slope="separate",covar.opt = list("include"),order=2)
+
+rdd_30_nc_post_data <- rdd_data(y = ln_weighted_account_creation, x=order, cutpoint = 31.5, data=test6)
+rdd_mod_nc_30_post <- rdd_reg_lm(rdd_object = rdd_30_nc_post_data, slope="separate",order=2)
+
+# plot the sample data
+summary(rdd_mod_30_post)
+summary(rdd_mod_nc_30_post)
+```
+
+
+
+# Appendix plots - Quarterly GDP
+
+```{r}
+setwd("C:/Users/JANGO/OneDrive - University of Bristol/Documents/MSc Dissertation/Data")
+qs_rec <- read.csv("qs_rec.csv", header = FALSE)
+colnames(qs_rec) <- c("quarter", "gdp_bn", "per_capita", "growth_rate")
+
+qs_rec[1,1] = "2007Q1"
+qs_rec %>% mutate(gdp_bn = as.numeric(gdp_bn), per_capita = as.numeric(per_capita)) %>% 
+  mutate(pos = ifelse(growth_rate > 0, 1, 0)) %>%
+  mutate(pos = as.factor(pos)) -> qs_rec
+
+ggplot(qs_rec)+
+  geom_bar(aes(x=quarter, y=growth_rate, fill=pos), stat="identity", show.legend = FALSE)+
+  labs(x="", y="Growth rate, % change in GDP")+
+  scale_x_discrete(guide = guide_axis(angle = 90))+
+  ylim(-10, 10)+
+  theme_minimal() -> p1
+
+qs_rec <- cbind(qs_rec,1:nrow(qs_rec)) %>% rename(order = "1:nrow(qs_rec)") %>% mutate(order=as.numeric(order))
+
+ggplot(qs_rec)+
+  geom_point(aes(x=order, y=gdp_bn), stat="identity", alpha=0)+
+  geom_smooth(aes(x=order, y=gdp_bn), method="gam", se=FALSE, cex=0.8)+
+  labs(x="", y="Gross GDP, $bn")+
+  scale_x_discrete(guide = guide_axis(angle = 90))+
+  ylim(13800,15200)+
+  theme_minimal() -> p2
+
+
+pdf(file = "recession_stack_plots.pdf", width = 8, height = 12)
+stack <- p3/p1/p2
+print(stack)
+dev.off()
+
+stack
+```
+
+
+
+
+
+# Robustness tests
+
+
+## Data load AME
+
+```{r}
+setwd("C:/Users/JANGO/Desktop/MySQL/csv_exports/small_scale/ame")
+ame_raw <- read.csv("ame_raw.csv", header=FALSE)
+colnames(ame_raw) <- c("steamid", "total_account_worth", "locstatecode")
+ame_raw %>% select(-c(locstatecode)) -> ame_raw
+```
+
+
+## Data load AEC
+
+```{r}
+setwd("C:/Users/JANGO/Desktop/MySQL/csv_exports/small_scale/networks")
+us_accounts <- read.csv("us_accounts.csv", header=FALSE)
+colnames(us_accounts) <- c("steamid", "timecreated", "existing_connections_count", "new_connections_count", "total_connections", "total_account_worth", "total_game_count", "total_game_count_paid", "total_hours_played", "total_hours_played_paid", "group_connections", "locstatecode")
+
+us_accounts$group_connections[us_accounts$group_connections=='NULL'] <- 0
+
+us_accounts %>% mutate(new_connections_count = as.numeric(new_connections_count), 
+                       total_connections = as.numeric(total_connections),
+                       group_connections = as.numeric(group_connections),
+                       steamid = as.character(steamid),
+                       timecreated = as.Date(timecreated)) -> us_accounts
+
+
+#clean up
+us_accounts <- us_accounts[!(us_accounts$locstatecode =="NULL"),] #drop null state observations
+us_accounts$new_connections_count[is.na(us_accounts$new_connections_count)] = 0 #tally error from mysql
+us_accounts %>% mutate(total_connections = new_connections_count+existing_connections_count) -> us_accounts #dealing with tally error carried forward
+
+```
+## Set-up AME/AEC
+
+```{r}
+#ame
+rob_check_dat_ame <- inner_join(player_summaries_us, ame_raw, by="steamid") %>%
+  select(-c(loccityid, loccountrycode)) 
+
+rob_check_dat_ame <- rob_check_dat_ame[!(rob_check_dat_ame$locstatecode=="AS" |
+                               rob_check_dat_ame$locstatecode=="FM" |
+                               rob_check_dat_ame$locstatecode=="GU" |
+                               rob_check_dat_ame$locstatecode=="MH" |
+                               rob_check_dat_ame$locstatecode=="MP" |
+                               rob_check_dat_ame$locstatecode=="PR" |
+                               rob_check_dat_ame$locstatecode=="PW" |
+                               rob_check_dat_ame$locstatecode=="VI"), ] 
+
+rob_check_dat_ame %>% group_by(locstatecode) %>% count(timecreated) %>%
+  rename(account_creation_tally = "n") %>% ungroup() -> merg3
+
+rob_check_dat_ame %>% group_by(locstatecode, timecreated) %>% 
+  summarise(monthly_expen_mean = mean(total_account_worth)) %>% ungroup() -> merg4
+
+rob_check_ame_tally <- cbind(merg3,merg4) %>% select(-c(4:5))
+rm(merg3,merg4)
+
+
+#aec
+us_accounts %>% filter(timecreated > "2009-01-01", timecreated < "2010-06-01") %>% 
+  mutate(steamid = as.numeric(steamid)) %>% select(c(steamid, existing_connections_count)) -> rob_check_dat_1
+
+rob_check_dat_aec <- inner_join(player_summaries_us, rob_check_dat_1, by="steamid") %>%
+  select(-c(loccityid, loccountrycode)) 
+
+rob_check_dat_aec <- rob_check_dat_aec[!(rob_check_dat_aec$locstatecode=="AS" |
+                               rob_check_dat_aec$locstatecode=="FM" |
+                               rob_check_dat_aec$locstatecode=="GU" |
+                               rob_check_dat_aec$locstatecode=="MH" |
+                               rob_check_dat_aec$locstatecode=="MP" |
+                               rob_check_dat_aec$locstatecode=="PR" |
+                               rob_check_dat_aec$locstatecode=="PW" |
+                               rob_check_dat_aec$locstatecode=="VI"), ] 
+
+
+rob_check_dat_aec %>% group_by(locstatecode) %>% count(timecreated) %>%
+  rename(account_creation_tally = "n") %>% ungroup() -> merg1
+
+rob_check_dat_aec %>% group_by(locstatecode, timecreated) %>% 
+  summarise(existing_connections_mean = mean(existing_connections_count)) %>% ungroup() -> merg2
+
+rob_check_aec_tally <- cbind(merg1,merg2) %>% select(-c(4:5))
+
+rm(merg1,merg2)
+
+```
+
+# AEC
+
+## Set-up for overlap period
+
+```{r}
+#generating discontinuity window - pre and post
+rob_check_aec_tally %>%
+  mutate(post_30= ifelse(timecreated >= "2009-06-01" & timecreated <= "2009-06-30", 1, 0),
+         post_30_a = ifelse(timecreated >= "2009-05-01" & timecreated <= "2009-05-31", 1, 0),
+         post_180= ifelse(timecreated >= "2009-06-01" & timecreated <= "2009-12-31", 1, 0),
+         post_180_a= ifelse(timecreated >= "2009-01-01" & timecreated <= "2009-05-31", 1, 0)) -> rob_check_aec_tally
+
+
+rob_check_disc_aec_daily_tally <- rob_check_aec_tally %>%
+  mutate(per_ind = ifelse(post_30 ==1 | post_30_a ==1 | post_180 ==1 | post_180_a ==1, 1, 0))
+
+rob_check_disc_aec_daily_tally <- rob_check_disc_aec_daily_tally[!(rob_check_disc_aec_daily_tally$per_ind==0),]
+rob_check_disc_state_aec_tally <- rob_check_disc_aec_daily_tally %>% select(-c(per_ind))
+
+```
+
+## Adding controls
+
+```{r}
+setwd("C:/Users/JANGO/OneDrive - University of Bristol/Documents/MSc Dissertation/Data/population")
+#weighting by state population as of April 1 2010 from the census. Data from https://www.census.gov/data/tables/time-series/demo/popest/2010s-state-total.html
+pop_2010 <- read.csv("nst-est2019-01mod.csv", header=FALSE, skip=2) %>% select(-c(V1,V2)) 
+colnames(pop_2010) <- c("locstatecode", "weighted_pop")
+
+pop_2010[-c(52:54),] -> pop_2010 #blank rows
+
+rob_check_disc_aec_daily_tally <- left_join(rob_check_disc_aec_daily_tally, pop_2010, by="locstatecode") %>%
+  mutate(weighted_account_creation = account_creation_tally*weighted_pop)
+
+rm(pop_2010)
+```
+
+```{r}
+setwd("C:/Users/JANGO/OneDrive - University of Bristol/Documents/MSc Dissertation/Data/controls")
+
+#median income
+medincome_2010 <- read.csv("median_income_us_2010.csv", skip =1, header=FALSE)
+colnames(medincome_2010) <- c("locstatecode", "median_income")
+
+rob_check_disc_aec_daily_tally <- left_join(rob_check_disc_aec_daily_tally, medincome_2010, by="locstatecode")
+
+#unemployment
+unemp_2010 <- read.csv("state_unemp_2010.csv", skip =1,  header=FALSE) %>% select(V2,V15)
+colnames(unemp_2010) <- c("locstatecode", "2010_unemp_rate")
+
+rob_check_disc_aec_daily_tally <- left_join(rob_check_disc_aec_daily_tally, unemp_2010, by="locstatecode") %>%
+  rename(unemp_rate_2010 = "2010_unemp_rate") %>%
+  rename(median_income_2010 = "median_income")
+
+#age composition
+age_comp_2010 <- read.csv("age_comp_19_25.csv", header=FALSE)
+colnames(age_comp_2010) <- c("locstatecode", "age_comp_19_25")
+
+rob_check_disc_aec_daily_tally <- left_join(rob_check_disc_aec_daily_tally, age_comp_2010, by="locstatecode")
+
+#election result
+election_2008 <- read.csv("2008_election.csv", header=FALSE)
+colnames(election_2008) <- c("locstatecode", "bin_outcome")
+
+election_2008 %>% mutate(ifelse(bin_outcome==2, "Blue", ifelse(bin_outcome==1, "Red", 0))) %>% 
+  {colnames(.)[3] = "outcome"; .} %>%
+  select("locstatecode", "outcome") -> election_2008
+
+election_2008[1,1] = "AL"
+
+rob_check_disc_aec_daily_tally <- left_join(rob_check_disc_aec_daily_tally, election_2008, by="locstatecode")
+
+#state output - https://dataverse.harvard.edu/dataset.xhtml?persistentId=doi:10.7910/DVN/CJBTGD
+state_output <- read_dta("state_economics.dta")
+state_output %>% filter(year==2010, quar==1.0, statename!="United States") %>%
+  select("stateabrev", "gsp") %>%
+  rename(locstatecode = "stateabrev") -> state_output
+
+rob_check_disc_aec_daily_tally <- left_join(rob_check_disc_aec_daily_tally, state_output, by="locstatecode")
+
+#education
+education_2010 <- read.csv("education_2010.csv", header=FALSE)
+colnames(education_2010) <- c("locstatecode", "hs_completers_2010")
+education_2010[1,1] = "AL"
+
+rob_check_disc_aec_daily_tally <- left_join(rob_check_disc_aec_daily_tally, education_2010, by="locstatecode")
+
+
+rm(medincome_2010, unemp_2010, age_comp_2010, election_2008, state_output, education_2010)
+
+```
+
+## Setting discontinuities
+
+```{r}
+#30 days
+rob_check_rdd_30_post_aec <- rob_check_disc_aec_daily_tally %>%
+  mutate(ln_weighted_account_creation = log(weighted_account_creation)) %>%
+  filter(post_30 ==1 | post_30_a ==1) %>%
+  select(-c(7:8)) %>% 
+  ungroup() 
+
+#180 days 
+rob_check_rdd_180_post_aec <- rob_check_disc_aec_daily_tally %>%
+  mutate(ln_weighted_account_creation = log(weighted_account_creation)) %>%
+  filter(post_180 ==1 | post_180_a ==1) %>%
+  select(-c(5:6)) %>%
+  ungroup() 
+
+```
+
+
+
+## 30 days
+```{r}
+#Post recession
+rob_check_rdd_30_post_aec %>%
+  group_by(locstatecode) %>%
+  mutate(order = 1:n()) %>%
+  mutate(order = as.numeric(order)) %>%
+  mutate(outcome = as.factor(outcome)) -> test10
+
+y <- test10$ln_weighted_account_creation
+W <- test10$order
+
+X1 <- as.numeric(test10$median_income_2010)
+X2 <- test10$unemp_rate_2010
+X3 <- test10$age_comp_19_25
+X4 <- test10$outcome
+X5 <- test10$gsp
+X6 <- test10$hs_completers_2010
+X7 <- test10$existing_connections_mean
+X8 <- test10$locstatecode
+
+covariates10<-data.frame(x1=X1, x2=X2, x3=X3, x4=X4, x5=X5, x6=X6, x7=X7, x8=X8)
+
+aec_rc_rdd_30_post_data <- rdd_data(y = ln_weighted_account_creation, x=order, covar=covariates10, cutpoint = 25.5, data=test10)
+aec_rc_rdd_mod_30_post <- rdd_reg_lm(rdd_object = aec_rc_rdd_30_post_data, covariates=X6, slope="separate",covar.opt = list("include"),order=2)
+
+summary(aec_rc_rdd_mod_30_post)
+
+```
+
+
+## 180 days
+
+```{r}
+#Post recession
+rob_check_rdd_180_post_aec %>%
+  group_by(locstatecode) %>%
+  mutate(order = 1:n()) %>%
+  mutate(order = as.numeric(order)) %>%
+  mutate(outcome = as.factor(outcome)) -> test11
+
+y <- test11$ln_weighted_account_creation
+W <- test11$order
+
+X1 <- as.numeric(test11$median_income_2010)
+X2 <- test11$unemp_rate_2010
+X3 <- test11$age_comp_19_25
+X4 <- test11$outcome
+X5 <- test11$gsp
+X6 <- test11$hs_completers_2010
+X7 <- test11$existing_connections_mean
+X8 <- test11$locstatecode
+
+covariates11<-data.frame(x1=X1, x2=X2, x3=X3, x4=X4, x5=X5, x6=X6, x7=X7, x8=X8)
+
+aec_rc_rdd_180_post_data <- rdd_data(y = ln_weighted_account_creation, x=order, covar=covariates11, cutpoint = 126.5, data=test11)
+aec_rc_rdd_mod_180_post <- rdd_reg_lm(rdd_object = aec_rc_rdd_180_post_data, covariates=X6, slope="separate",covar.opt = list("include"),order=2)
+
+summary(aec_rc_rdd_mod_180_post)
+
+```
+
+
+
+
+
+
+
+# AME
+
+## Set-up for overlap period
+
+```{r}
+#generating discontinuity window - pre and post
+rob_check_ame_tally %>%
+    mutate(pre_30 = ifelse(timecreated >= "2007-12-01" & timecreated <= "2007-12-31", 1, 0),
+         pre_30_b = ifelse(timecreated >= "2008-01-01" & timecreated <= "2008-01-31", 1, 0),
+         post_30= ifelse(timecreated >= "2009-06-01" & timecreated <= "2009-06-30", 1, 0),
+         post_30_a = ifelse(timecreated >= "2009-05-01" & timecreated <= "2009-05-31", 1, 0),
+         pre_180 = ifelse(timecreated >= "2007-06-01" & timecreated <= "2007-12-31", 1, 0),
+         pre_180_b = ifelse(timecreated >= "2008-01-01" & timecreated <= "2008-06-01", 1, 0),
+         post_180= ifelse(timecreated >= "2009-06-01" & timecreated <= "2009-12-31", 1, 0),
+         post_180_a= ifelse(timecreated >= "2009-01-01" & timecreated <= "2009-05-31", 1, 0),
+         pre_360  = ifelse(timecreated >= "2006-12-01" & timecreated <= "2007-12-31", 1, 0),
+         pre_360_b  = ifelse(timecreated >= "2008-01-01" & timecreated <= "2009-01-01", 1, 0),
+         post_360 = ifelse(timecreated >= "2009-06-01" & timecreated <= "2010-06-01", 1, 0),
+         post_360_a = ifelse(timecreated >= "2008-06-01" & timecreated <= "2009-05-31", 1, 0),
+         during     = ifelse(timecreated >  "2007-12-31" & timecreated <  "2009-06-01", 1, 0 )) -> rob_check_aec_tally
+
+
+rob_check_disc_ame_daily_tally <- rob_check_aec_tally %>%
+  mutate(per_ind = ifelse(pre_30 ==1 | pre_30_b ==1 | post_30 ==1 | post_30_a ==1 | 
+                            pre_180 ==1 | pre_180_b ==1 | post_180 ==1 | post_180_a ==1 |
+                            pre_360 ==1 | pre_360_b ==1 | post_360 ==1 | post_360_a ==1 |
+                            during ==1, 1, 0))
+
+
+rob_check_disc_ame_daily_tally <- rob_check_disc_ame_daily_tally[!(rob_check_disc_ame_daily_tally$per_ind==0),]
+rob_check_disc_state_ame_tally <- rob_check_disc_ame_daily_tally %>% select(-c(per_ind))
+```
+
+## Adding controls
+
+```{r}
+setwd("C:/Users/JANGO/OneDrive - University of Bristol/Documents/MSc Dissertation/Data/population")
+#weighting by state population as of April 1 2010 from the census. Data from https://www.census.gov/data/tables/time-series/demo/popest/2010s-state-total.html
+pop_2010 <- read.csv("nst-est2019-01mod.csv", header=FALSE, skip=2) %>% select(-c(V1,V2)) 
+colnames(pop_2010) <- c("locstatecode", "weighted_pop")
+
+pop_2010[-c(52:54),] -> pop_2010 #blank rows
+
+rob_check_disc_ame_daily_tally <- left_join(rob_check_disc_ame_daily_tally, pop_2010, by="locstatecode") %>%
+  mutate(weighted_account_creation = account_creation_tally*weighted_pop)
+
+rm(pop_2010)
+```
+
+```{r}
+setwd("C:/Users/JANGO/OneDrive - University of Bristol/Documents/MSc Dissertation/Data/controls")
+
+#median income
+medincome_2010 <- read.csv("median_income_us_2010.csv", skip =1, header=FALSE)
+colnames(medincome_2010) <- c("locstatecode", "median_income")
+
+rob_check_disc_ame_daily_tally <- left_join(rob_check_disc_ame_daily_tally, medincome_2010, by="locstatecode")
+
+#unemployment
+unemp_2010 <- read.csv("state_unemp_2010.csv", skip =1,  header=FALSE) %>% select(V2,V15)
+colnames(unemp_2010) <- c("locstatecode", "2010_unemp_rate")
+
+rob_check_disc_ame_daily_tally <- left_join(rob_check_disc_ame_daily_tally, unemp_2010, by="locstatecode") %>%
+  rename(unemp_rate_2010 = "2010_unemp_rate") %>%
+  rename(median_income_2010 = "median_income")
+
+#age composition
+age_comp_2010 <- read.csv("age_comp_19_25.csv", header=FALSE)
+colnames(age_comp_2010) <- c("locstatecode", "age_comp_19_25")
+
+rob_check_disc_ame_daily_tally <- left_join(rob_check_disc_ame_daily_tally, age_comp_2010, by="locstatecode")
+
+#election result
+election_2008 <- read.csv("2008_election.csv", header=FALSE)
+colnames(election_2008) <- c("locstatecode", "bin_outcome")
+
+election_2008 %>% mutate(ifelse(bin_outcome==2, "Blue", ifelse(bin_outcome==1, "Red", 0))) %>% 
+  {colnames(.)[3] = "outcome"; .} %>%
+  select("locstatecode", "outcome") -> election_2008
+
+election_2008[1,1] = "AL"
+
+rob_check_disc_ame_daily_tally <- left_join(rob_check_disc_ame_daily_tally, election_2008, by="locstatecode")
+
+#state output - https://dataverse.harvard.edu/dataset.xhtml?persistentId=doi:10.7910/DVN/CJBTGD
+state_output <- read_dta("state_economics.dta")
+state_output %>% filter(year==2010, quar==1.0, statename!="United States") %>%
+  select("stateabrev", "gsp") %>%
+  rename(locstatecode = "stateabrev") -> state_output
+
+rob_check_disc_ame_daily_tally <- left_join(rob_check_disc_ame_daily_tally, state_output, by="locstatecode")
+
+#education
+education_2010 <- read.csv("education_2010.csv", header=FALSE)
+colnames(education_2010) <- c("locstatecode", "hs_completers_2010")
+education_2010[1,1] = "AL"
+
+rob_check_disc_ame_daily_tally <- left_join(rob_check_disc_ame_daily_tally, education_2010, by="locstatecode")
+
+
+rm(medincome_2010, unemp_2010, age_comp_2010, election_2008, state_output, education_2010)
+
+```
+
+## Setting discontinuities
+
+```{r}
+
+#30 days
+rob_check_rdd_30_pre_ame <- rob_check_disc_ame_daily_tally %>%
+  mutate(ln_weighted_account_creation = log(weighted_account_creation)) %>%
+  filter(pre_30 ==1 | pre_30_b ==1) %>%
+  select(-c(7:16)) %>% 
+  ungroup() 
+
+rob_check_rdd_30_post_ame <- rob_check_disc_ame_daily_tally %>%
+  mutate(ln_weighted_account_creation = log(weighted_account_creation)) %>%
+  filter(post_30 ==1 | post_30_a ==1) %>%
+  select(-c(5:6,9:16)) %>% 
+  ungroup() 
+
+#180 days
+rob_check_rdd_180_pre_ame <- rob_check_disc_ame_daily_tally %>%
+  mutate(ln_weighted_account_creation = log(weighted_account_creation)) %>%
+  filter(pre_180 ==1 | pre_180_b ==1) %>%
+  select(-c(5:8,11:16)) %>%
+  ungroup() 
+
+rob_check_rdd_180_post_ame <- rob_check_disc_ame_daily_tally %>%
+  mutate(ln_weighted_account_creation = log(weighted_account_creation)) %>%
+  filter(post_180 ==1 | post_180_a ==1) %>%
+  select(-c(5:10,13:16)) %>%
+  ungroup() 
+
+#360 days
+rob_check_rdd_360_pre_ame <- rob_check_disc_ame_daily_tally %>%
+  mutate(ln_weighted_account_creation = log(weighted_account_creation)) %>%
+  filter(pre_360 ==1  | pre_360_b ==1) %>% 
+  select(-c(5:12,15:16)) %>%
+  ungroup()
+
+rob_check_rdd_360_post_ame <- rob_check_disc_ame_daily_tally %>%
+  mutate(ln_weighted_account_creation = log(weighted_account_creation)) %>%
+  filter(post_360 ==1  | post_360_a ==1) %>% 
+  select(-c(5:14)) %>%
+  ungroup()
+
+```
+
+
+# AME NOREC
+
+
+## PRE/POST RDD estimation - norec - 360 days
+
+```{r}
+rob_check_disc_ame_daily_tally %>%
+  mutate(ln_weighted_account_creation = log(weighted_account_creation)) %>%
+  filter(pre_360 ==1 | post_360 ==1) %>%
+  select(-c(5:12,14,16)) %>% 
+  ungroup() %>%
+  group_by(locstatecode) %>%
+  mutate(order = 1:n()) %>%
+  mutate(order = as.numeric(order)) %>%
+  ungroup() %>%
+  mutate(outcome = as.factor(outcome))-> rc1
+
+y <- rc1$ln_weighted_account_creation
+W <- rc1$order
+
+X1 <- as.numeric(rc1$median_income_2010)
+X2 <- rc1$unemp_rate_2010
+X3 <- rc1$age_comp_19_25
+X4 <- rc1$outcome
+X5 <- rc1$gsp
+X6 <- rc1$hs_completers_2010
+X7 <- rc1$monthly_expen_mean
+X8 <- rc1$locstatecode
+
+rc_covariates1<-data.frame(x1=X1, x2=X2, x3=X3, x4=X4, x5=X5, x6=X6, x7=X7, x8=X8)
+
+rc_rdd_360_norec_data <- rdd_data(y = ln_weighted_account_creation, x=order, covar=rc_covariates1, cutpoint = 300.5, data=rc1)
+rc_rdd_mod_360_norec <- rdd_reg_lm(rdd_object = rc_rdd_360_norec_data, covariates=X6, slope="separate",covar.opt = list("include"),order=2)
+
+rc_rdd_360_norec_data_nc <- rdd_data(y = ln_weighted_account_creation, x=order, cutpoint = 300.5, data=rc1)
+rc_rdd_mod_nc_360_norec <- rdd_reg_lm(rdd_object = rc_rdd_360_norec_data_nc, slope="separate", order=2)
+
+summary(rc_rdd_mod_360_norec)
+summary(rc_rdd_mod_nc_360_norec)
+```
+
+
+
+## PRE/POST RDD estimation - norec - 180 days
+
+```{r}
+rob_check_disc_ame_daily_tally %>%
+  mutate(ln_weighted_account_creation = log(weighted_account_creation)) %>%
+  filter(pre_180 ==1 | post_180 ==1) %>%
+  select(-c(5:8,10,12:17)) %>% 
+  ungroup() %>%
+  group_by(locstatecode) %>%
+  mutate(order = 1:n()) %>%
+  mutate(order = as.numeric(order)) %>%
+  ungroup() %>%
+  mutate(outcome = as.factor(outcome))-> rc2
+
+y <- rc2$ln_weighted_account_creation
+W <- rc2$order
+
+X1 <- as.numeric(rc2$median_income_2010)
+X2 <- rc2$unemp_rate_2010
+X3 <- rc2$age_comp_19_25
+X4 <- rc2$outcome
+X5 <- rc2$gsp
+X6 <- rc2$hs_completers_2010
+X7 <- rc2$monthly_expen_mean
+X8 <- rc2$locstatecode
+
+rc_covariates2<-data.frame(x1=X1, x2=X2, x3=X3, x4=X4, x5=X5, x6=X6, x7=X7, x8=X8)
+
+rc_rdd_180_norec_data <- rdd_data(y = ln_weighted_account_creation, x=order, covar=rc_covariates2, cutpoint = 186.5, data=rc2)
+rc_rdd_mod_180_norec <- rdd_reg_lm(rdd_object = rc_rdd_180_norec_data, covariates=X6, slope="separate",covar.opt= list("include"),order=2)
+
+rc_rdd_180_norec_data_nc <- rdd_data(y = ln_weighted_account_creation, x=order, cutpoint = 186.5, data=rc2)
+rc_rdd_mod_nc_180_norec <- rdd_reg_lm(rdd_object = rc_rdd_180_norec_data_nc, slope="separate", order=2)
+
+summary(rc_rdd_mod_180_norec)
+summary(rc_rdd_mod_nc_180_norec)
+```
+
+
+
+## PRE/POST RDD estimation - norec - 30 days
+
+```{r}
+rob_check_disc_ame_daily_tally %>%
+  mutate(ln_weighted_account_creation = log(weighted_account_creation)) %>%
+  filter(pre_30 ==1 | post_30 ==1) %>%
+  select(-c(6,8:17)) %>% 
+  ungroup() %>%
+  group_by(locstatecode) %>%
+  mutate(order = 1:n()) %>%
+  mutate(order = as.numeric(order)) %>%
+  ungroup() %>%
+  mutate(outcome = as.factor(outcome))-> rc3
+
+y <- rc3$lnweighted_account_creation
+W <- rc3$order
+
+X1 <- as.numeric(rc3$median_income_2010)
+X2 <- rc3$unemp_rate_2010
+X3 <- rc3$age_comp_19_25
+X4 <- rc3$outcome
+X5 <- rc3$gsp
+X6 <- rc3$hs_completers_2010
+X7 <- rc3$monthly_expen_mean
+X8 <- rc3$locstatecode
+
+rc_covariates3<-data.frame(x1=X1, x2=X2, x3=X3, x4=X4, x5=X5, x6=X6, x7=X7, x8=X8)
+
+rc_rdd_30_norec_data <- rdd_data(y = ln_weighted_account_creation, x=order, covar=rc_covariates3, cutpoint = 26.5, data=rc3)
+rc_rdd_mod_30_norec <- rdd_reg_lm(rdd_object = rc_rdd_30_norec_data, covariates=X6, slope="separate",covar.opt= list("include"),order=2)
+
+rc_rdd_30_norec_data_nc <- rdd_data(y = ln_weighted_account_creation, x=order, cutpoint = 26.5, data=rc3)
+rc_rdd_mod_nc_30_norec <- rdd_reg_lm(rdd_object = rc_rdd_30_norec_data_nc, slope="separate", order=2)
+
+summary(rc_rdd_mod_30_norec)
+summary(rc_rdd_mod_nc_30_norec)
+
+```
+
+
+# AME REC - no need to run, controlling for AME in RDDs above changes nothing
+
