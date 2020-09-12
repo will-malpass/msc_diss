@@ -1,7 +1,11 @@
+# All scripts require an SQL environment to function - recommended to install MySQL Server & Workbench (as well as required connector/ODBC)
+
 Run the schema creation script first in prelim folder
 
+# Unpack the SQL dump into "sdb" schema before running scripts
 
 All tables derived from the original data in the SQL dump: https://steam.internet.byu.edu/
+
 
 
 Use the script provided in quick_csv_export.sql to export the tables - the in-built export wizard in MySQL is incredibly slow.
