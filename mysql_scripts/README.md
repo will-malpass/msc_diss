@@ -1,4 +1,7 @@
-# All scripts require an SQL environment to function - recommended to install MySQL Server & Workbench (as well as required connector/ODBC)
+# All scripts require an SQL environment to function - recommended to install MySQL Server & Workbench (as well as required connector/ODBC), installer is found here:
+
+https://dev.mysql.com/downloads/installer/
+
 
 Run the schema creation script first in prelim folder
 
