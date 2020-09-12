@@ -1,4 +1,4 @@
-# All scripts require an SQL environment to function - recommended to install MySQL Server & Workbench (as well as required connector/ODBC), installer is found here:
+# All scripts require an SQL environment to function - recommended to install MySQL Server & Workbench (as well as required connector/ODBC), which can be found here:
 
 https://dev.mysql.com/downloads/installer/
 
