@@ -1,5 +1,5 @@
 /* generate random sample (n=5000) */
-CREATE TABLE in_means.sample_25k AS
+CREATE TABLE in_means.sample_5k AS
 SELECT * FROM exports.final_1 
 WHERE rand() <= .3
 AND locstatecode != 'NULL'
@@ -7,12 +7,12 @@ LIMIT 5000;
 
 CREATE TABLE in_means.friends_b AS
 	SELECT 
-    in_means.sample_25k.steamid,
+    in_means.sample_5k.steamid,
 	networks.us_connections.steamid_b
 	FROM
-	in_means.sample_25k
+	in_means.sample_5k
 	LEFT JOIN networks.us_connections
-    ON in_means.sample_25k.steamid = networks.us_connections.steamid;
+    ON in_means.sample_5k.steamid = networks.us_connections.steamid;
 
 ALTER TABLE `in_means`.`friends_b` 
 CHANGE COLUMN `steamid` `original` BIGINT UNSIGNED NULL DEFAULT NULL ;
