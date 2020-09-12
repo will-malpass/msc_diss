@@ -1,10 +1,13 @@
 # msc_diss
-Code dump for dissertation
+
+
+## Code dump for dissertation
 
 R Markdown files are:
 
-network_effects_rmd
-rdd_rmd
+network_effects.rmd
+
+rdd.rmd
 
 ^working directories for each chunk will need to be updated, data for the analysis is available from (link expires on 11/12/20):
 
