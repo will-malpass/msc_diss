@@ -8,7 +8,9 @@ output:
 
 #Prep
 
-Working directories are where data exists on my PC - each chunk with a specified directory will need changing to the path where the data is held (PC specific). All data available from: https://uob-my.sharepoint.com/:f:/g/personal/wm15380_bristol_ac_uk/EqV-zTEge_1NgpoSvkaY6goBGya8smaoEH5z5Noi1ortGw?e=nvJksw
+Working directories are where data exists on my PC - each chunk with a specified directory will need changing to the path where the data is held. All data used in this analysis is available from (link expires 11/12/2020):
+
+https://uob-my.sharepoint.com/:f:/g/personal/wm15380_bristol_ac_uk/EqV-zTEge_1NgpoSvkaY6goBGya8smaoEH5z5Noi1ortGw?e=OzVdPb
 
 ```{r include=FALSE}
 knitr::opts_chunk$set(comment = NA)
