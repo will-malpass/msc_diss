@@ -3,7 +3,7 @@
 
 ## Code dump for dissertation
 
-R Markdown files are:
+### R Markdown files:
 
 network_effects.rmd
 
@@ -16,4 +16,4 @@ https://uob-my.sharepoint.com/:f:/g/personal/wm15380_bristol_ac_uk/EqV-zTEge_1Ng
 
 
 
-MySQL scripts are:
+### MySQL scripts:
