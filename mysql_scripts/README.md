@@ -3,7 +3,7 @@
 https://dev.mysql.com/downloads/installer/
 
 
-Run the schema creation script first in prelim folder
+Run the schema creation script first in "prelim" folder
 
 # Unpack the SQL dump into "sdb" schema before running scripts
 
@@ -26,4 +26,4 @@ rdd_rob_data_gen.sql
 
 
 
-## Script for generating the final export table for network effects are provided in final folder
+## Script for generating the final export table for network effects are provided in "final" folder
