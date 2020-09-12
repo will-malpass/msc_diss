@@ -2,9 +2,10 @@
 
 ## R Markdown files:
 
-network_effects.rmd
+Requires R: https://www.r-project.org/
 
-rdd.rmd
+Markdowns requires RStudio: https://rstudio.com/products/rstudio/
+
 
 N.B. The working directories for each chunk will need to be updated when running in a new environment, data for the analysis is available from (link expires on 11/12/20):
 
